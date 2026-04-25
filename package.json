@@ -1,0 +1,24 @@
+{
+  "name": "node-based-chat",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n web,api -c blue,green \"npm run dev --workspace @node-based-chat/web\" \"npm run dev --workspace @node-based-chat/api\"",
+    "dev:web": "npm run dev --workspace @node-based-chat/web",
+    "dev:api": "npm run dev --workspace @node-based-chat/api",
+    "db:generate": "drizzle-kit generate --config drizzle.config.ts",
+    "db:migrate": "drizzle-kit migrate --config drizzle.config.ts",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1",
+    "drizzle-kit": "^0.31.7",
+    "drizzle-orm": "^0.45.2",
+    "typescript": "^5.8.3"
+  }
+}
