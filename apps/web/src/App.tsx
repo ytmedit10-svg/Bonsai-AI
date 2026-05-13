@@ -556,7 +556,8 @@ const MAX_COMPOSED_PROMPT_CHARS = 58000;
 const MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL?.trim() || "http://127.0.0.1:4000";
+  import.meta.env.VITE_API_BASE_URL?.trim() ||
+  (import.meta.env.PROD ? "" : "http://127.0.0.1:4000");
 const ENABLE_ADMIN_UI =
   import.meta.env.VITE_ENABLE_ADMIN_UI?.trim().toLowerCase() === "true";
 

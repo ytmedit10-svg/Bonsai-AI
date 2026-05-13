@@ -18,7 +18,8 @@
     "setup:postgres:windows": "powershell -ExecutionPolicy Bypass -File scripts/setup-local-postgres-windows.ps1",
     "db:generate": "drizzle-kit generate --config drizzle.config.ts",
     "db:migrate": "drizzle-kit migrate --config drizzle.config.ts",
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build --workspace @node-based-chat/shared && npm run build --workspace @node-based-chat/api && npm run build --workspace @node-based-chat/web",
+    "start": "npm run start --workspace @node-based-chat/api",
     "eval:replay": "npm run eval:replay --workspace @node-based-chat/api",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"

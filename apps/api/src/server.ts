@@ -1,4 +1,9 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
 import { ZodError } from "zod";
 
@@ -13,6 +18,12 @@ import { registerRetrievalRoutes } from "./routes/retrieval.js";
 import { registerSearchRoutes } from "./routes/search.js";
 import { buildApiError } from "./services/api-error.js";
 
+const currentFilePath = fileURLToPath(import.meta.url);
+const currentDir = path.dirname(currentFilePath);
+const workspaceRoot = path.resolve(currentDir, "../../..");
+const webDistDir = path.join(workspaceRoot, "apps/web/dist");
+const webIndexHtml = path.join(webDistDir, "index.html");
+
 export const buildServer = () => {
   const server = Fastify({
     bodyLimit: 12 * 1024 * 1024,
@@ -21,14 +32,6 @@ export const buildServer = () => {
 
   void server.register(cors, {
     origin: true
-  });
-
-  server.get("/", async () => {
-    return {
-      ok: true,
-      service: "api",
-      message: "Bonsai AI API is running."
-    };
   });
 
   server.setErrorHandler((error, request, reply) => {
@@ -63,6 +66,36 @@ export const buildServer = () => {
   registerPathRoutes(server);
   registerRetrievalRoutes(server);
   registerSearchRoutes(server);
+
+  if (fs.existsSync(webIndexHtml)) {
+    void server.register(fastifyStatic, {
+      root: webDistDir,
+      wildcard: false
+    });
+
+    server.setNotFoundHandler((request, reply) => {
+      if (request.method !== "GET") {
+        void reply.code(404).send(
+          buildApiError({
+            code: "NOT_FOUND",
+            message: "Route not found.",
+            type: "validation"
+          })
+        );
+        return;
+      }
+
+      void reply.type("text/html").sendFile("index.html");
+    });
+  } else {
+    server.get("/", async () => {
+      return {
+        ok: true,
+        service: "api",
+        message: "Bonsai AI API is running."
+      };
+    });
+  }
 
   return server;
 };
