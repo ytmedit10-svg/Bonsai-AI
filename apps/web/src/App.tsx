@@ -3548,6 +3548,9 @@ export const App = () => {
   const [draftsByPathId, setDraftsByPathId] = useState<DraftByPathId>({});
   const [composerAttachmentsByPathId, setComposerAttachmentsByPathId] =
     useState<ComposerAttachmentsByPathId>({});
+  const [pendingDraft, setPendingDraft] = useState("");
+  const [pendingAttachments, setPendingAttachments] = useState<ComposerAttachment[]>([]);
+  const [pendingWebSearchEnabled, setPendingWebSearchEnabled] = useState(false);
   const [previewImage, setPreviewImage] = useState<ImagePreview | null>(null);
   const [webSearchByPathId, setWebSearchByPathId] = useState<Record<string, boolean>>({});
   const [localModels, setLocalModels] = useState<LocalModelOption[]>([]);
@@ -3583,12 +3586,13 @@ export const App = () => {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [pendingSearchMessageId, setPendingSearchMessageId] = useState<string | null>(null);
   const [citationPreview, setCitationPreview] = useState<CitationPreview | null>(null);
-  const [status, setStatus] = useState("Create a conversation to begin.");
+  const [status, setStatus] = useState("Ask anything to start a new chat.");
   const [error, setErrorState] = useState<UserFacingError | null>(null);
   const setError = (value: unknown) => {
     setErrorState(value ? normalizeUserFacingError(value) : null);
   };
   const [isCreatingConversation, setIsCreatingConversation] = useState(false);
+  const [isBootstrappingFirstMessage, setIsBootstrappingFirstMessage] = useState(false);
   const [isCreatingBranch, setIsCreatingBranch] = useState(false);
   const [isSavingMessageEdit, setIsSavingMessageEdit] = useState(false);
   const [isGraphOverlayOpen, setIsGraphOverlayOpen] = useState(false);
@@ -3657,10 +3661,10 @@ export const App = () => {
     [activePathId, paths]
   );
 
-  const draft = activePathId ? draftsByPathId[activePathId] ?? "" : "";
+  const draft = activePathId ? draftsByPathId[activePathId] ?? "" : pendingDraft;
   const activeComposerAttachments = activePathId
     ? composerAttachmentsByPathId[activePathId] ?? []
-    : [];
+    : pendingAttachments;
   const latestEditableUserMessageId = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index];
@@ -3681,7 +3685,9 @@ export const App = () => {
   }, [messages]);
   const isWebSearchAvailable = activeModelProvider === "google";
   const isWebSearchEnabled =
-    isWebSearchAvailable && activePathId ? Boolean(webSearchByPathId[activePathId]) : false;
+    isWebSearchAvailable && activePathId
+      ? Boolean(webSearchByPathId[activePathId])
+      : isWebSearchAvailable && pendingWebSearchEnabled;
   const isSending = activePathId ? streamingPathIds.includes(activePathId) : false;
   const selectedLocalModel =
     localModels.find((model) => model.name === selectedLocalModelName) ?? null;
@@ -3705,10 +3711,11 @@ export const App = () => {
       : modelSelectorTitle;
   const selectedModelModeLabel = selectedThinkingEnabled ? "Thinking" : "Fast";
   const isLocalModelControlDisabled =
-    !conversation || isSending || isLoadingLocalModels || localModels.length === 0;
+    isSending || isBootstrappingFirstMessage || isLoadingLocalModels || localModels.length === 0;
 
   const setActiveDraft = (value: string) => {
     if (!activePathId) {
+      setPendingDraft(value);
       return;
     }
 
@@ -3736,6 +3743,14 @@ export const App = () => {
     }));
   };
 
+  const addPendingComposerAttachments = (attachments: ComposerAttachment[]) => {
+    if (attachments.length === 0) {
+      return;
+    }
+
+    setPendingAttachments((current) => [...current, ...attachments]);
+  };
+
   const removeComposerAttachment = (pathId: string, attachmentId: string) => {
     setComposerAttachmentsByPathId((current) => ({
       ...current,
@@ -3752,6 +3767,11 @@ export const App = () => {
       ...current,
       [pathId]: false
     }));
+  };
+
+  const clearPendingComposerContext = () => {
+    setPendingAttachments([]);
+    setPendingWebSearchEnabled(false);
   };
 
   const setPathStreaming = (pathId: string, streaming: boolean) => {
@@ -3973,10 +3993,17 @@ export const App = () => {
 
   const canSend = useMemo(
     () =>
-      Boolean(activePathId) &&
       (Boolean(draft.trim()) || activeComposerAttachments.length > 0) &&
-      !isSending,
-    [activeComposerAttachments.length, activePathId, draft, isSending]
+      !isSending &&
+      !isBootstrappingFirstMessage &&
+      !isCreatingConversation,
+    [
+      activeComposerAttachments.length,
+      draft,
+      isBootstrappingFirstMessage,
+      isCreatingConversation,
+      isSending
+    ]
   );
 
   const persistLocalActivePathFallback = () => {
@@ -4123,74 +4150,94 @@ export const App = () => {
     return result.merges;
   };
 
+  const initializeNewConversation = async (title: string, readyStatus: string) => {
+    const result = await createConversation(title);
+    const mainPathItem: ConversationPath = {
+      createdAt: new Date().toISOString(),
+      depth: 0,
+      id: result.mainPath.id,
+      isMain: true,
+      parentPathId: null,
+      pathType: "chat",
+      splitBlockEndOffset: null,
+      splitBlockStartOffset: null,
+      splitBlockType: null,
+      splitFocusText: null,
+      splitFromMessageId: null,
+      splitMessageCreatedAt: null,
+      splitMessagePreview: null,
+      splitMessageSequenceNo: null,
+      title: result.mainPath.title
+    };
+    const nextActivePath: PathSummary = {
+      conversationId: result.conversation.id,
+      depth: 0,
+      isMain: true,
+      parentPathId: null,
+      pathId: result.mainPath.id,
+      pathTitle: result.mainPath.title,
+      splitFromMessageId: null
+    };
+
+    activePathIdRef.current = result.mainPath.id;
+    startTransition(() => {
+      setConversation(result.conversation);
+      setPaths([mainPathItem]);
+      setActivePathId(result.mainPath.id);
+      setActivePath(nextActivePath);
+      setProvenance(null);
+      setSnapshot(null);
+      setMessagesForPath(result.mainPath.id, []);
+      setMessages([]);
+      setConversationMerges([]);
+      setMergeResult(null);
+      setMergeConfirmation(null);
+      setMergeSuccessNotice(null);
+      setSelectedMergeId(null);
+      setSelectedMergeDetail(null);
+      setMergeMode("light");
+      setStatus(readyStatus);
+    });
+
+    if (isPhoneViewport()) {
+      setIsSidebarCollapsed(true);
+    }
+
+    setRecentChats((current) =>
+      upsertRecentChat(current, {
+        conversationId: result.conversation.id,
+        mainPathId: result.mainPath.id,
+        pinnedAt: null,
+        preview: "Start the conversation to generate a title.",
+        title: "New chat",
+        updatedAt: new Date().toISOString()
+      })
+    );
+    void refreshSidebarChats().catch(() => {
+      // The optimistic sidebar item keeps the newly created chat visible.
+    });
+
+    return {
+      ...result,
+      activePath: nextActivePath,
+      mainPathItem
+    };
+  };
+
   const handleCreateConversation = async () => {
+    if (isCreatingConversation || isBootstrappingFirstMessage) {
+      return;
+    }
+
     setIsCreatingConversation(true);
     setError(null);
     setStatus("Creating a new chat...");
 
     try {
-      const result = await createConversation(conversationTitle.trim() || "Untitled Chat");
-      const mainPathItem: ConversationPath = {
-        createdAt: new Date().toISOString(),
-        depth: 0,
-        id: result.mainPath.id,
-        isMain: true,
-        parentPathId: null,
-        pathType: "chat",
-        splitBlockEndOffset: null,
-        splitBlockStartOffset: null,
-        splitBlockType: null,
-        splitFocusText: null,
-        splitFromMessageId: null,
-        splitMessageCreatedAt: null,
-        splitMessagePreview: null,
-        splitMessageSequenceNo: null,
-        title: result.mainPath.title
-      };
-
-      activePathIdRef.current = result.mainPath.id;
-      startTransition(() => {
-        setConversation(result.conversation);
-        setPaths([mainPathItem]);
-        setActivePathId(result.mainPath.id);
-        setActivePath({
-          conversationId: result.conversation.id,
-          depth: 0,
-          isMain: true,
-          parentPathId: null,
-          pathId: result.mainPath.id,
-          pathTitle: result.mainPath.title,
-          splitFromMessageId: null
-        });
-        setProvenance(null);
-        setSnapshot(null);
-        setMessagesForPath(result.mainPath.id, []);
-        setMessages([]);
-        setConversationMerges([]);
-        setMergeResult(null);
-        setMergeConfirmation(null);
-        setMergeSuccessNotice(null);
-        setSelectedMergeId(null);
-        setSelectedMergeDetail(null);
-        setMergeMode("light");
-        setStatus("New chat ready. Send the first message.");
-      });
-      if (isPhoneViewport()) {
-        setIsSidebarCollapsed(true);
-      }
-      setRecentChats((current) =>
-        upsertRecentChat(current, {
-          conversationId: result.conversation.id,
-          mainPathId: result.mainPath.id,
-          pinnedAt: null,
-          preview: "Start the conversation to generate a title.",
-          title: "New chat",
-          updatedAt: new Date().toISOString()
-        })
+      await initializeNewConversation(
+        conversationTitle.trim() || "Untitled Chat",
+        "New chat ready. Send the first message."
       );
-      void refreshSidebarChats().catch(() => {
-        // The optimistic sidebar item keeps the newly created chat visible.
-      });
     } catch (createError) {
       const message =
         createError instanceof Error ? createError.message : "Failed to create conversation.";
@@ -4202,7 +4249,7 @@ export const App = () => {
   };
 
   const handleSelectRecentChat = async (chat: RecentChat) => {
-    if (isCreatingConversation) {
+    if (isCreatingConversation || isBootstrappingFirstMessage) {
       return;
     }
 
@@ -4734,6 +4781,23 @@ export const App = () => {
   }, [draft]);
 
   useEffect(() => {
+    if (
+      !hasLoadedRecentChats ||
+      recentChats.length > 0 ||
+      conversation ||
+      activePathId ||
+      typeof window === "undefined" ||
+      isPhoneViewport()
+    ) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      composerInputRef.current?.focus();
+    });
+  }, [activePathId, conversation, hasLoadedRecentChats, recentChats.length]);
+
+  useEffect(() => {
     if (!isComposerMenuOpen || typeof document === "undefined") {
       return;
     }
@@ -5219,21 +5283,25 @@ export const App = () => {
     options?: {
       attachments?: MessageAttachment[];
       modelName?: string | null;
+      targetActivePath?: PathSummary | null;
+      targetConversationId?: string | null;
+      targetPathId?: string | null;
       thinkingEnabled?: boolean;
       webSearchEnabled?: boolean;
     }
   ) => {
+    const targetPathId = options?.targetPathId ?? activePathId;
+
     if (
-      !activePathId ||
+      !targetPathId ||
       !userText.trim() ||
-      streamingPathIdsRef.current.has(activePathId)
+      streamingPathIdsRef.current.has(targetPathId)
     ) {
       return;
     }
 
-    const targetPathId = activePathId;
-    const targetActivePath = activePath;
-    const targetConversationId = conversation?.id ?? null;
+    const targetActivePath = options?.targetActivePath ?? activePath;
+    const targetConversationId = options?.targetConversationId ?? conversation?.id ?? null;
     const promptText = userText.trim();
     const messageAttachments = options?.attachments ?? [];
     const optimisticUserId = createOptimisticId("user");
@@ -5472,10 +5540,6 @@ export const App = () => {
   };
 
   const handleComposerFiles = async (files: FileList | File[]) => {
-    if (!activePathId) {
-      return;
-    }
-
     const fileArray = Array.from(files);
 
     if (fileArray.length === 0) {
@@ -5484,7 +5548,13 @@ export const App = () => {
 
     try {
       const attachments = await Promise.all(fileArray.map(readFileAsComposerAttachment));
-      addComposerAttachments(activePathId, attachments);
+
+      if (activePathId) {
+        addComposerAttachments(activePathId, attachments);
+      } else {
+        addPendingComposerAttachments(attachments);
+      }
+
       setStatus(
         attachments.length === 1
           ? `Attached ${attachments[0].name}.`
@@ -5510,10 +5580,6 @@ export const App = () => {
   };
 
   const handleComposerPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!activePathId) {
-      return;
-    }
-
     const files = Array.from(event.clipboardData.files);
 
     if (files.length > 0) {
@@ -5535,19 +5601,29 @@ export const App = () => {
       source: "clipboard"
     });
 
-    addComposerAttachments(activePathId, [attachment]);
+    if (activePathId) {
+      addComposerAttachments(activePathId, [attachment]);
+    } else {
+      addPendingComposerAttachments([attachment]);
+    }
+
     setStatus("Large pasted text attached as a .txt file.");
   };
 
   const handleToggleWebSearch = () => {
-    if (!activePathId || !isWebSearchAvailable) {
+    if (!isWebSearchAvailable) {
       return;
     }
 
-    setWebSearchByPathId((current) => ({
-      ...current,
-      [activePathId]: !current[activePathId]
-    }));
+    if (activePathId) {
+      setWebSearchByPathId((current) => ({
+        ...current,
+        [activePathId]: !current[activePathId]
+      }));
+    } else {
+      setPendingWebSearchEnabled((current) => !current);
+    }
+
     setIsComposerMenuOpen(false);
   };
 
@@ -5583,13 +5659,17 @@ export const App = () => {
   };
 
   const handleSend = async () => {
-    if (!activePathId || isSending) {
+    if (isSending || isBootstrappingFirstMessage || isCreatingConversation) {
       return;
     }
 
-    const targetPathId = activePathId;
-    const attachments = composerAttachmentsByPathId[targetPathId] ?? [];
-    const webSearchEnabled = isWebSearchAvailable && Boolean(webSearchByPathId[targetPathId]);
+    const initialPathId = activePathId;
+    const attachments = initialPathId
+      ? composerAttachmentsByPathId[initialPathId] ?? []
+      : pendingAttachments;
+    const webSearchEnabled =
+      isWebSearchAvailable &&
+      (initialPathId ? Boolean(webSearchByPathId[initialPathId]) : pendingWebSearchEnabled);
     const userText = buildPromptWithComposerContext({
       attachments,
       text: draft,
@@ -5600,7 +5680,47 @@ export const App = () => {
       return;
     }
 
+    let targetPathId = initialPathId;
+    let targetActivePath = activePath;
+    let targetConversationId = conversation?.id ?? null;
     let uploadedAttachments: ComposerAttachment[];
+
+    if (!targetPathId) {
+      setIsBootstrappingFirstMessage(true);
+      setError(null);
+      setStatus("Creating a new chat...");
+
+      try {
+        const result = await initializeNewConversation(
+          conversationTitle.trim() || "Untitled Chat",
+          "Preparing first message..."
+        );
+
+        const bootstrappedPathId = result.mainPath.id;
+        targetPathId = bootstrappedPathId;
+        targetActivePath = result.activePath;
+        targetConversationId = result.conversation.id;
+        setDraftForPath(bootstrappedPathId, pendingDraft);
+
+        if (attachments.length > 0) {
+          addComposerAttachments(bootstrappedPathId, attachments);
+        }
+
+        if (webSearchEnabled) {
+          setWebSearchByPathId((current) => ({
+            ...current,
+            [bootstrappedPathId]: true
+          }));
+        }
+      } catch (createError) {
+        const message =
+          createError instanceof Error ? createError.message : "Failed to create conversation.";
+        setError(message);
+        setStatus("Conversation creation failed.");
+        setIsBootstrappingFirstMessage(false);
+        return;
+      }
+    }
 
     try {
       setStatus(attachments.length > 0 ? "Uploading attachments..." : "Preparing message...");
@@ -5610,6 +5730,7 @@ export const App = () => {
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Attachment upload failed.");
       setStatus("Attachment upload failed.");
+      setIsBootstrappingFirstMessage(false);
       return;
     }
 
@@ -5617,18 +5738,28 @@ export const App = () => {
 
     setDraftForPath(targetPathId, "");
     clearComposerContextForPath(targetPathId);
+    setPendingDraft("");
+    clearPendingComposerContext();
     setIsComposerMenuOpen(false);
     setIsLocalModelMenuOpen(false);
-    await sendPathPrompt(
-      userText,
-      webSearchEnabled ? "Streaming web-grounded assistant reply..." : undefined,
-      {
-        attachments: messageAttachments,
-        modelName: selectedChatModelName,
-        thinkingEnabled: selectedThinkingEnabled,
-        webSearchEnabled
-      }
-    );
+
+    try {
+      await sendPathPrompt(
+        userText,
+        webSearchEnabled ? "Streaming web-grounded assistant reply..." : undefined,
+        {
+          attachments: messageAttachments,
+          modelName: selectedChatModelName,
+          targetActivePath,
+          targetConversationId,
+          targetPathId,
+          thinkingEnabled: selectedThinkingEnabled,
+          webSearchEnabled
+        }
+      );
+    } finally {
+      setIsBootstrappingFirstMessage(false);
+    }
   };
 
   const handleCopyMessage = async (message: Message, label: string) => {
@@ -6518,7 +6649,7 @@ export const App = () => {
           setActivePathId(null);
           setMessages([]);
           setConversationMerges([]);
-          setStatus(nextChat ? "Loading next chat..." : "Create a conversation to begin.");
+          setStatus(nextChat ? "Loading next chat..." : "Ask anything to start a new chat.");
         });
 
         if (nextChat) {
@@ -6601,7 +6732,7 @@ export const App = () => {
             <SidebarMenuItem>
               <SidebarMenuButton
                 className="new-chat-button"
-                disabled={isCreatingConversation}
+                disabled={isCreatingConversation || isBootstrappingFirstMessage}
                 onClick={handleCreateConversation}
                 type="button"
               >
@@ -7027,16 +7158,16 @@ export const App = () => {
               <span className="hero-empty__badge">Start here</span>
               <h3 className="hero-empty__title">A cleaner AI chat, centered on reading</h3>
               <p className="hero-empty__copy">
-                Create a new chat, ask your first question, and the title in the sidebar
-                will adapt from your opening messages.
+                Ask your first question in the composer below. A new chat will be created
+                automatically when you send.
               </p>
               <Button
                 className="primary-button primary-button--inline"
-                disabled={isCreatingConversation}
+                disabled={isCreatingConversation || isBootstrappingFirstMessage}
                 onClick={handleCreateConversation}
                 type="button"
               >
-                {isCreatingConversation ? "Creating..." : "Create new chat"}
+                {isCreatingConversation ? "Creating..." : "Start blank chat"}
               </Button>
             </div>
           ) : messages.length === 0 ? (
@@ -7355,7 +7486,7 @@ export const App = () => {
                   aria-expanded={isComposerMenuOpen}
                   aria-label="Open attachment menu"
                   className="composer-plus-button"
-                  disabled={!conversation}
+                  disabled={isBootstrappingFirstMessage}
                   onClick={() => setIsComposerMenuOpen((current) => !current)}
                   type="button"
                 >
@@ -7441,6 +7572,10 @@ export const App = () => {
                         onClick={() => {
                           if (activePathId) {
                             removeComposerAttachment(activePathId, attachment.id);
+                          } else {
+                            setPendingAttachments((current) =>
+                              current.filter((item) => item.id !== attachment.id)
+                            );
                           }
                         }}
                         type="button"
@@ -7535,10 +7670,10 @@ export const App = () => {
 
               <Textarea
                 className="composer-input"
-                disabled={!conversation}
+                disabled={isBootstrappingFirstMessage}
                 onChange={(event) => setActiveDraft(event.target.value)}
                 onPaste={handleComposerPaste}
-                placeholder={!conversation ? "Create a new chat to begin..." : "Ask anything..."}
+                placeholder="Ask anything..."
                 ref={composerInputRef}
                 rows={1}
                 value={draft}
