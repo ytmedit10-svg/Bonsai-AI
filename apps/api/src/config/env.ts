@@ -48,6 +48,16 @@ const parseCommaSeparatedList = (value: string | undefined, fallback: string[]) 
   return items.length > 0 ? Array.from(new Set(items)) : fallback;
 };
 
+const optionalEnvString = (value: string | undefined) => {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+};
+
+const optionalPortEnvString = (value: string | undefined) => {
+  const normalized = optionalEnvString(value);
+  return normalized === "0" ? undefined : normalized;
+};
+
 const envSchema = z.object({
   API_HOST: z.string().default(DEFAULT_API_HOST),
   API_PORT: z.coerce.number().int().positive().default(DEFAULT_API_PORT),
@@ -108,7 +118,14 @@ export type Env = z.infer<typeof envSchema> & {
 };
 
 export const loadEnv = (): Env => {
-  const env = envSchema.parse(process.env);
+  const platformPort = optionalPortEnvString(process.env.PORT);
+  const apiPort = optionalPortEnvString(process.env.API_PORT);
+  const apiHost = optionalEnvString(process.env.API_HOST);
+  const env = envSchema.parse({
+    ...process.env,
+    API_HOST: apiHost ?? (platformPort === undefined ? undefined : "0.0.0.0"),
+    API_PORT: platformPort ?? apiPort
+  });
   const geminiAvailableModels = Array.from(
     new Set([
       ...env.GEMINI_AVAILABLE_MODELS,

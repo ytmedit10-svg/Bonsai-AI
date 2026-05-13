@@ -7,6 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "dev:worker": "tsx watch src/worker.ts",
     "build": "tsc -p tsconfig.json",
+    "db:migrate:deploy": "node dist/db/migrate.js",
     "eval:replay": "tsx src/eval/replay.ts",
     "start": "node dist/index.js",
     "test": "tsx src/services/message-lineage.test.ts",

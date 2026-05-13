@@ -325,8 +325,8 @@ Core settings:
 | --- | --- |
 | `AI_PROVIDER` | `ollama`, `gemini`, `mock`, or `auto` |
 | `DATABASE_URL` | PostgreSQL connection string |
-| `API_HOST` | API bind host |
-| `API_PORT` | API port, default `4000` |
+| `API_HOST` | API bind host; defaults to `127.0.0.1`, or `0.0.0.0` when hosted `PORT` is present |
+| `API_PORT` | API port, default `4000`; hosted platforms can omit this and provide `PORT` |
 | `VITE_API_BASE_URL` | Frontend API URL |
 | `ATTACHMENT_STORAGE_PROVIDER` | `auto`, `local`, or `r2` |
 | `LOCAL_UPLOAD_DIR` | Local upload directory for local attachment storage |
