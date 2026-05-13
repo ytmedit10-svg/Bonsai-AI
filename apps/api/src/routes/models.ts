@@ -71,7 +71,7 @@ export const registerModelRoutes = (server: FastifyInstance) => {
           models.find((model) => model.name === inferenceProfile.chatModel)?.name ??
           models[0]?.name ??
           null,
-        supportsThinking: true
+        supportsThinking: false
       };
     }
 

@@ -89,12 +89,7 @@ const resolveGeminiModelName = (
   return requested;
 };
 
-const createThinkingConfig = (thinkingEnabled?: boolean) => ({
-  thinkingConfig: {
-    includeThoughts: false,
-    thinkingBudget: thinkingEnabled ? -1 : 0
-  }
-});
+const createThinkingConfig = (_thinkingEnabled?: boolean) => ({});
 
 const getErrorStatusCode = (error: unknown) => {
   if (!error || typeof error !== "object" || !("status" in error)) {
