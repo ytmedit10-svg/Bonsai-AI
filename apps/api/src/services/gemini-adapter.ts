@@ -1,4 +1,4 @@
-import { GoogleGenAI, type GenerateContentConfig } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, type GenerateContentConfig } from "@google/genai";
 
 import { loadEnv } from "../config/env.js";
 import type { Message } from "../db/schema.js";
@@ -89,30 +89,48 @@ const resolveGeminiModelName = (
   return requested;
 };
 
-export const supportsGeminiThinking = (modelName: string) => {
-  const normalized = modelName.trim().toLowerCase().replace(/^models\//u, "");
+export type GeminiThinkingConfigMode = "gemma-thinking-level" | "none";
 
-  return (
-    normalized === "gemini-2.5-flash" ||
-    normalized.startsWith("gemini-2.5-flash-") ||
-    normalized === "gemini-2.5-flash-lite" ||
-    normalized.startsWith("gemini-2.5-flash-lite-")
-  );
+const normalizeGeminiModelName = (modelName: string) =>
+  modelName.trim().toLowerCase().replace(/^models\//u, "");
+
+export const getGeminiThinkingConfigMode = (
+  modelName: string
+): GeminiThinkingConfigMode => {
+  const normalized = normalizeGeminiModelName(modelName);
+
+  if (
+    normalized === "gemma-4-26b-a4b-it" ||
+    normalized === "gemma-4-31b-it"
+  ) {
+    return "gemma-thinking-level";
+  }
+
+  return "none";
 };
+
+export const supportsGeminiThinking = (modelName: string) =>
+  getGeminiThinkingConfigMode(modelName) !== "none";
 
 const createThinkingConfig = (
   modelName: string,
   thinkingEnabled?: boolean
 ): GenerateContentConfig => {
-  if (!supportsGeminiThinking(modelName)) {
+  if (!thinkingEnabled) {
     return {};
   }
 
-  return {
-    thinkingConfig: {
-      thinkingBudget: thinkingEnabled ? -1 : 0
-    }
-  };
+  const thinkingConfigMode = getGeminiThinkingConfigMode(modelName);
+
+  if (thinkingConfigMode === "gemma-thinking-level") {
+    return {
+      thinkingConfig: {
+        thinkingLevel: ThinkingLevel.HIGH
+      }
+    };
+  }
+
+  return {};
 };
 
 const getErrorStatusCode = (error: unknown) => {

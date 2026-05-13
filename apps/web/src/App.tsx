@@ -393,9 +393,11 @@ type LocalModelOption = {
   modifiedAt: string | null;
   name: string;
   parameterSize: string | null;
+  provider?: string;
   quantizationLevel: string | null;
   size: number | null;
   supportsThinking?: boolean;
+  thinkingConfigMode?: "gemma-thinking-level" | "ollama-native" | "none";
 };
 
 type LocalModelsResponse = {
@@ -3691,7 +3693,7 @@ export const App = () => {
   const selectedThinkingEnabled =
     isLocalModelSelectorEnabled && doesSelectedModelSupportThinking && isThinkingEnabled;
   const isHostedModelSelector = activeModelProvider === "google";
-  const modelSelectorTitle = isHostedModelSelector ? "Hosted models" : "Gemma 4";
+  const modelSelectorTitle = "Gemma 4";
   const selectedLocalModelLabel = selectedLocalModel
     ? isHostedModelSelector
       ? selectedLocalModel.label

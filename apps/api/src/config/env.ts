@@ -9,7 +9,8 @@ import { APP_NAME, DEFAULT_API_HOST, DEFAULT_API_PORT } from "@node-based-chat/s
 const currentFilePath = fileURLToPath(import.meta.url);
 const currentDir = path.dirname(currentFilePath);
 const workspaceRoot = path.resolve(currentDir, "../../../..");
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+const DEFAULT_GEMINI_MODEL = "gemma-4-26b-a4b-it";
+const DEFAULT_GEMINI_MODELS = [DEFAULT_GEMINI_MODEL, "gemma-4-31b-it"];
 
 config({
   path: path.join(workspaceRoot, ".env")
@@ -79,7 +80,7 @@ const envSchema = z.object({
   GEMINI_AVAILABLE_MODELS: z
     .string()
     .optional()
-    .transform((value) => parseCommaSeparatedList(value, [DEFAULT_GEMINI_MODEL])),
+    .transform((value) => parseCommaSeparatedList(value, DEFAULT_GEMINI_MODELS)),
   OLLAMA_BASE_URL: z.string().url().default("http://127.0.0.1:11434"),
   OLLAMA_MODEL: z.string().default("gemma4:e4b"),
   OLLAMA_MERGE_MODEL: z.string().default("gemma4:e4b"),

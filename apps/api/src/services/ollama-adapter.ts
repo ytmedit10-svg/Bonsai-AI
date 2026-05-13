@@ -122,8 +122,11 @@ export type LocalOllamaModelOption = {
   modifiedAt: string | null;
   name: string;
   parameterSize: string | null;
+  provider: "ollama";
   quantizationLevel: string | null;
   size: number | null;
+  supportsThinking: boolean;
+  thinkingConfigMode: "ollama-native";
 };
 
 export class OllamaProviderError extends Error {
@@ -300,8 +303,11 @@ export const listLocalGemmaModels = async () => {
         modifiedAt: model.modified_at ?? null,
         name,
         parameterSize,
+        provider: "ollama",
         quantizationLevel,
-        size: model.size ?? null
+        size: model.size ?? null,
+        supportsThinking: true,
+        thinkingConfigMode: "ollama-native"
       };
     })
     .sort((left, right) => left.label.localeCompare(right.label));

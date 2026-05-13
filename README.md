@@ -293,9 +293,9 @@ To use hosted Gemini instead of local Ollama, update `.env`:
 ```env
 AI_PROVIDER=gemini
 GEMINI_API_KEY=your-gemini-api-key
-GEMINI_AVAILABLE_MODELS=gemini-2.5-flash
-GEMINI_DEFAULT_MODEL=gemini-2.5-flash
-GEMINI_MERGE_MODEL=gemini-2.5-flash
+GEMINI_AVAILABLE_MODELS=gemma-4-26b-a4b-it,gemma-4-31b-it
+GEMINI_DEFAULT_MODEL=gemma-4-26b-a4b-it
+GEMINI_MERGE_MODEL=gemma-4-26b-a4b-it
 ATTACHMENT_STORAGE_PROVIDER=r2
 R2_ENDPOINT=https://your-account-id.r2.cloudflarestorage.com
 R2_BUCKET=your-r2-bucket
@@ -308,10 +308,10 @@ Hosted model options in the UI come from `GEMINI_AVAILABLE_MODELS`.
 as the default for merge and compaction work, and is also allowed as a selectable
 hosted model.
 
-Keep hosted model names limited to Gemini API model IDs that support
-`generateContent`. The frontend does not hardcode hosted model choices; it
-renders the list returned by the API. Thinking variants are shown only for
-hosted Gemini models that the API marks as thinking-capable.
+Keep hosted model names limited to valid Gemma 4 Gemini API model IDs. The
+frontend does not hardcode hosted model choices; it renders the list returned by
+the API. Thinking variants are shown only for models that the API marks as
+thinking-capable.
 
 ## Environment Reference
 
@@ -346,7 +346,7 @@ Gemini settings:
 | Variable | Purpose |
 | --- | --- |
 | `GEMINI_API_KEY` | Hosted Gemini API key |
-| `GEMINI_AVAILABLE_MODELS` | Comma-separated hosted Gemini API model IDs shown in the UI |
+| `GEMINI_AVAILABLE_MODELS` | Comma-separated hosted Gemma 4 Gemini API model IDs shown in the UI |
 | `GEMINI_DEFAULT_MODEL` | Hosted fallback chat model |
 | `GEMINI_MERGE_MODEL` | Hosted fallback merge/compaction model |
 
@@ -461,8 +461,8 @@ Model selector is not showing models:
 - Local Ollama mode: confirm `AI_PROVIDER=ollama`, Ollama is running, and
   `ollama list` includes `gemma4:*` models.
 - Hosted Gemini mode: confirm `AI_PROVIDER=gemini` and
-  `GEMINI_AVAILABLE_MODELS` contains comma-separated Gemini API model IDs such
-  as `gemini-2.5-flash`.
+  `GEMINI_AVAILABLE_MODELS` contains comma-separated hosted Gemma 4 IDs such as
+  `gemma-4-26b-a4b-it` and `gemma-4-31b-it`.
 
 ## Privacy Modes
 

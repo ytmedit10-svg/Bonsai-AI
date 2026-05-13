@@ -3,7 +3,10 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { loadEnv } from "../config/env.js";
 import { getActiveInferenceProfile } from "../services/ai-adapter.js";
 import { buildApiError } from "../services/api-error.js";
-import { supportsGeminiThinking } from "../services/gemini-adapter.js";
+import {
+  getGeminiThinkingConfigMode,
+  supportsGeminiThinking
+} from "../services/gemini-adapter.js";
 import {
   listLocalGemmaModels,
   OllamaProviderError
@@ -30,24 +33,19 @@ const titleCaseModelName = (modelName: string) =>
 const formatHostedModelLabel = (modelName: string) => {
   const normalized = modelName.toLowerCase();
 
-  if (normalized.startsWith("gemini-2.5-flash-lite")) {
-    return "Gemini 2.5 Flash Lite";
+  if (normalized === "gemma-4-26b-a4b-it") {
+    return "Gemma 4 26B A4B";
   }
 
-  if (normalized.startsWith("gemini-2.5-flash")) {
-    return "Gemini 2.5 Flash";
-  }
-
-  if (normalized.startsWith("gemini-2.5-pro")) {
-    return "Gemini 2.5 Pro";
-  }
-
-  if (normalized.startsWith("gemini-3")) {
-    return titleCaseModelName(modelName).replace(/^Gemini 3/u, "Gemini 3");
+  if (normalized === "gemma-4-31b-it") {
+    return "Gemma 4 31B";
   }
 
   return titleCaseModelName(modelName);
 };
+
+const getHostedModelFamily = (modelName: string) =>
+  modelName.toLowerCase().startsWith("gemma-4") ? "gemma4" : "hosted";
 
 const getHostedModels = () => {
   const inferenceProfile = getActiveInferenceProfile();
@@ -58,15 +56,17 @@ const getHostedModels = () => {
 
   return [
     ...env.GEMINI_AVAILABLE_MODELS.map((modelName) => ({
-      family: modelName.toLowerCase().startsWith("gemini") ? "gemini" : "hosted",
+      family: getHostedModelFamily(modelName),
       id: modelName,
       label: formatHostedModelLabel(modelName),
       modifiedAt: null,
       name: modelName,
       parameterSize: null,
+      provider: "google",
       quantizationLevel: null,
       size: null,
-      supportsThinking: supportsGeminiThinking(modelName)
+      supportsThinking: supportsGeminiThinking(modelName),
+      thinkingConfigMode: getGeminiThinkingConfigMode(modelName)
     }))
   ];
 };

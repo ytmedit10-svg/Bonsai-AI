@@ -26,7 +26,7 @@ type GeneratePathCompactionInput = {
   sourceMessages: Message[];
 };
 
-const MOCK_MODEL_NAME = "gemini-2.5-flash";
+const MOCK_MODEL_NAME = "gemma-4-26b-a4b-it";
 
 const usageForText = (text: string) => ({
   cachedTokens: 0,
