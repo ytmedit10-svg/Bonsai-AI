@@ -395,6 +395,7 @@ type LocalModelOption = {
   parameterSize: string | null;
   quantizationLevel: string | null;
   size: number | null;
+  supportsThinking?: boolean;
 };
 
 type LocalModelsResponse = {
@@ -3684,15 +3685,22 @@ export const App = () => {
     localModels.find((model) => model.name === selectedLocalModelName) ?? null;
   const selectedChatModelName =
     isLocalModelSelectorEnabled && selectedLocalModel ? selectedLocalModel.name : null;
+  const doesSelectedModelSupportThinking =
+    doesSelectedProviderSupportThinking &&
+    (selectedLocalModel?.supportsThinking ?? doesSelectedProviderSupportThinking);
   const selectedThinkingEnabled =
-    isLocalModelSelectorEnabled && doesSelectedProviderSupportThinking && isThinkingEnabled;
+    isLocalModelSelectorEnabled && doesSelectedModelSupportThinking && isThinkingEnabled;
+  const isHostedModelSelector = activeModelProvider === "google";
+  const modelSelectorTitle = isHostedModelSelector ? "Hosted models" : "Gemma 4";
   const selectedLocalModelLabel = selectedLocalModel
-    ? selectedLocalModel.label
-        .replace(/^Gemma 4\s*/u, "")
-        .trim()
+    ? isHostedModelSelector
+      ? selectedLocalModel.label
+      : selectedLocalModel.label
+          .replace(/^Gemma 4\s*/u, "")
+          .trim()
     : isLoadingLocalModels
       ? "Loading"
-      : "Gemma 4";
+      : modelSelectorTitle;
   const selectedModelModeLabel = selectedThinkingEnabled ? "Thinking" : "Fast";
   const isLocalModelControlDisabled =
     !conversation || isSending || isLoadingLocalModels || localModels.length === 0;
@@ -7448,7 +7456,9 @@ export const App = () => {
                     aria-controls="composer-local-model-menu"
                     aria-expanded={isLocalModelMenuOpen}
                     aria-haspopup="listbox"
-                    aria-label="Choose local Gemma 4 model"
+                    aria-label={
+                      isHostedModelSelector ? "Choose hosted model" : "Choose local Gemma 4 model"
+                    }
                     className="composer-model-trigger"
                     disabled={isLocalModelControlDisabled}
                     onClick={handleToggleLocalModelMenu}
@@ -7464,15 +7474,18 @@ export const App = () => {
                       id="composer-local-model-menu"
                       role="listbox"
                     >
-                      <div className="composer-model-popover__title">Gemma 4</div>
+                      <div className="composer-model-popover__title">{modelSelectorTitle}</div>
                       {localModels.flatMap((model) => {
+                        const doesModelSupportThinking =
+                          doesSelectedProviderSupportThinking &&
+                          (model.supportsThinking ?? doesSelectedProviderSupportThinking);
                         const variants = [
                           {
                             description: "Answers quickly",
                             label: "Fast",
                             thinkingEnabled: false
                           },
-                          ...(doesSelectedProviderSupportThinking
+                          ...(doesModelSupportThinking
                             ? [
                                 {
                                   description: "Solves complex problems",

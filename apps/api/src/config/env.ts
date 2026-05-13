@@ -9,6 +9,7 @@ import { APP_NAME, DEFAULT_API_HOST, DEFAULT_API_PORT } from "@node-based-chat/s
 const currentFilePath = fileURLToPath(import.meta.url);
 const currentDir = path.dirname(currentFilePath);
 const workspaceRoot = path.resolve(currentDir, "../../../..");
+const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 
 config({
   path: path.join(workspaceRoot, ".env")
@@ -73,14 +74,12 @@ const envSchema = z.object({
   LOCAL_UPLOAD_DIR: z.string().default(".runtime/uploads"),
   AI_PROVIDER: z.enum(["auto", "gemini", "ollama", "mock"]).default("gemini"),
   GEMINI_API_KEY: z.string().optional(),
-  GEMINI_DEFAULT_MODEL: z.string().default("gemma-4-31b-it"),
-  GEMINI_MERGE_MODEL: z.string().default("gemma-4-31b-it"),
+  GEMINI_DEFAULT_MODEL: z.string().default(DEFAULT_GEMINI_MODEL),
+  GEMINI_MERGE_MODEL: z.string().default(DEFAULT_GEMINI_MODEL),
   GEMINI_AVAILABLE_MODELS: z
     .string()
     .optional()
-    .transform((value) =>
-      parseCommaSeparatedList(value, ["gemma-4-31b-it"])
-    ),
+    .transform((value) => parseCommaSeparatedList(value, [DEFAULT_GEMINI_MODEL])),
   OLLAMA_BASE_URL: z.string().url().default("http://127.0.0.1:11434"),
   OLLAMA_MODEL: z.string().default("gemma4:e4b"),
   OLLAMA_MERGE_MODEL: z.string().default("gemma4:e4b"),

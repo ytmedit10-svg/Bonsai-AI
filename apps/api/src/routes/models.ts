@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { loadEnv } from "../config/env.js";
 import { getActiveInferenceProfile } from "../services/ai-adapter.js";
 import { buildApiError } from "../services/api-error.js";
+import { supportsGeminiThinking } from "../services/gemini-adapter.js";
 import {
   listLocalGemmaModels,
   OllamaProviderError
@@ -10,31 +11,45 @@ import {
 
 const env = loadEnv();
 
-const formatHostedGemmaModelLabel = (modelName: string) => {
+const titleCaseModelName = (modelName: string) =>
+  modelName
+    .replace(/^models\//u, "")
+    .split("-")
+    .filter(Boolean)
+    .map((part) => {
+      if (/^\d+(?:\.\d+)?$/u.test(part)) {
+        return part;
+      }
+
+      return part.toUpperCase() === part
+        ? part
+        : `${part.charAt(0).toUpperCase()}${part.slice(1)}`;
+    })
+    .join(" ");
+
+const formatHostedModelLabel = (modelName: string) => {
   const normalized = modelName.toLowerCase();
 
-  if (normalized.includes("e2b")) {
-    return "Gemma 4 E2B";
+  if (normalized.startsWith("gemini-2.5-flash-lite")) {
+    return "Gemini 2.5 Flash Lite";
   }
 
-  if (normalized.includes("e4b")) {
-    return "Gemma 4 E4B";
+  if (normalized.startsWith("gemini-2.5-flash")) {
+    return "Gemini 2.5 Flash";
   }
 
-  if (normalized.includes("26b")) {
-    return normalized.includes("a4b") ? "Gemma 4 26B A4B" : "Gemma 4 26B";
+  if (normalized.startsWith("gemini-2.5-pro")) {
+    return "Gemini 2.5 Pro";
   }
 
-  if (normalized.includes("31b")) {
-    return "Gemma 4 31B";
+  if (normalized.startsWith("gemini-3")) {
+    return titleCaseModelName(modelName).replace(/^Gemini 3/u, "Gemini 3");
   }
 
-  return modelName.toLowerCase().startsWith("gemma")
-    ? modelName
-    : `Gemma 4 ${modelName}`;
+  return titleCaseModelName(modelName);
 };
 
-const getHostedGemmaModels = () => {
+const getHostedModels = () => {
   const inferenceProfile = getActiveInferenceProfile();
 
   if (inferenceProfile.provider !== "google") {
@@ -43,14 +58,15 @@ const getHostedGemmaModels = () => {
 
   return [
     ...env.GEMINI_AVAILABLE_MODELS.map((modelName) => ({
-      family: "gemma4",
+      family: modelName.toLowerCase().startsWith("gemini") ? "gemini" : "hosted",
       id: modelName,
-      label: formatHostedGemmaModelLabel(modelName),
+      label: formatHostedModelLabel(modelName),
       modifiedAt: null,
       name: modelName,
       parameterSize: null,
       quantizationLevel: null,
-      size: null
+      size: null,
+      supportsThinking: supportsGeminiThinking(modelName)
     }))
   ];
 };
@@ -60,7 +76,7 @@ export const registerModelRoutes = (server: FastifyInstance) => {
     const inferenceProfile = getActiveInferenceProfile();
 
     if (inferenceProfile.provider === "google") {
-      const models = getHostedGemmaModels() ?? [];
+      const models = getHostedModels() ?? [];
 
       return {
         defaultModel: inferenceProfile.chatModel,
@@ -71,7 +87,7 @@ export const registerModelRoutes = (server: FastifyInstance) => {
           models.find((model) => model.name === inferenceProfile.chatModel)?.name ??
           models[0]?.name ??
           null,
-        supportsThinking: false
+        supportsThinking: models.some((model) => model.supportsThinking)
       };
     }
 

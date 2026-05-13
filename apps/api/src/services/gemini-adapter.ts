@@ -89,7 +89,31 @@ const resolveGeminiModelName = (
   return requested;
 };
 
-const createThinkingConfig = (_thinkingEnabled?: boolean) => ({});
+export const supportsGeminiThinking = (modelName: string) => {
+  const normalized = modelName.trim().toLowerCase().replace(/^models\//u, "");
+
+  return (
+    normalized === "gemini-2.5-flash" ||
+    normalized.startsWith("gemini-2.5-flash-") ||
+    normalized === "gemini-2.5-flash-lite" ||
+    normalized.startsWith("gemini-2.5-flash-lite-")
+  );
+};
+
+const createThinkingConfig = (
+  modelName: string,
+  thinkingEnabled?: boolean
+): GenerateContentConfig => {
+  if (!supportsGeminiThinking(modelName)) {
+    return {};
+  }
+
+  return {
+    thinkingConfig: {
+      thinkingBudget: thinkingEnabled ? -1 : 0
+    }
+  };
+};
 
 const getErrorStatusCode = (error: unknown) => {
   if (!error || typeof error !== "object" || !("status" in error)) {
@@ -348,6 +372,7 @@ const buildPathGenerationRequest = async ({
 }: GeneratePathReplyInput & { ai: GoogleGenAI }) => {
   const normalizedSnapshot = inheritedSnapshotText?.trim() ?? "";
   const normalizedMemory = memoryContextText?.trim() ?? "";
+  const resolvedModelName = resolveGeminiModelName(modelName);
 
   if (!normalizedSnapshot) {
     return {
@@ -360,7 +385,7 @@ const buildPathGenerationRequest = async ({
       }),
       config: withGoogleSearchTool(
         {
-          ...createThinkingConfig(thinkingEnabled),
+          ...createThinkingConfig(resolvedModelName, thinkingEnabled),
           systemInstruction: SYSTEM_INSTRUCTION
         },
         webSearchEnabled
@@ -372,7 +397,7 @@ const buildPathGenerationRequest = async ({
   const cachePlan = await resolveSplitSnapshotCache({
     ai,
     conversationId: latestMessage?.conversationId ?? null,
-    modelName: resolveGeminiModelName(modelName),
+    modelName: resolvedModelName,
     pathId: latestMessage?.pathId ?? null,
     snapshotText: normalizedSnapshot,
     systemInstruction: SYSTEM_INSTRUCTION
@@ -389,7 +414,7 @@ const buildPathGenerationRequest = async ({
       }),
       config: withGoogleSearchTool(
         {
-          ...createThinkingConfig(thinkingEnabled),
+          ...createThinkingConfig(resolvedModelName, thinkingEnabled),
           cachedContent: cachePlan.cachedContentName
         },
         webSearchEnabled
@@ -408,7 +433,7 @@ const buildPathGenerationRequest = async ({
     }),
       config: withGoogleSearchTool(
         {
-          ...createThinkingConfig(thinkingEnabled),
+          ...createThinkingConfig(resolvedModelName, thinkingEnabled),
           systemInstruction: SYSTEM_INSTRUCTION
         },
         webSearchEnabled
@@ -624,7 +649,7 @@ export const generatePathCompaction = async ({
         }
       ],
       config: {
-        ...createThinkingConfig(thinkingEnabled),
+        ...createThinkingConfig(resolvedModelName, thinkingEnabled),
         systemInstruction: COMPACTION_SYSTEM_INSTRUCTION
       }
     })
@@ -709,7 +734,7 @@ export const generateMergeArtifact = async ({
         }
       ],
       config: {
-        ...createThinkingConfig(thinkingEnabled),
+        ...createThinkingConfig(resolvedModelName, thinkingEnabled),
         systemInstruction: MERGE_SYSTEM_INSTRUCTION
       }
     })
@@ -760,7 +785,7 @@ export const generateConversationTitle = async ({
         }
       ],
       config: {
-        ...createThinkingConfig(thinkingEnabled),
+        ...createThinkingConfig(resolvedModelName, thinkingEnabled),
         systemInstruction: TITLE_SYSTEM_INSTRUCTION
       }
     })

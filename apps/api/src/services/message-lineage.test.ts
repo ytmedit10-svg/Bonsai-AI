@@ -21,11 +21,11 @@ const firstLineageJson = buildRegeneratedAssistantContentJson({
   existingMessage: {
     contentText: "First answer.",
     createdAt: new Date("2026-05-05T10:00:00.000Z"),
-    modelName: "gemma-4-31b-it",
+    modelName: "gemini-2.5-flash",
     modelProvider: "google"
   },
   messageId: "22222222-2222-2222-2222-222222222222",
-  modelName: "gemma-4-31b-it",
+  modelName: "gemini-2.5-flash",
   modelProvider: "google",
   modelRunId: "33333333-3333-3333-3333-333333333333",
   sourceUserMessageId
@@ -52,11 +52,11 @@ const secondLineageJson = buildRegeneratedAssistantContentJson({
   existingMessage: {
     contentText: "Second answer with more detail.",
     createdAt: new Date("2026-05-05T10:01:00.000Z"),
-    modelName: "gemma-4-31b-it",
+    modelName: "gemini-2.5-flash",
     modelProvider: "google"
   },
   messageId: "22222222-2222-2222-2222-222222222222",
-  modelName: "gemma-4-31b-it",
+  modelName: "gemini-2.5-flash",
   modelProvider: "google",
   modelRunId: "44444444-4444-4444-4444-444444444444",
   sourceUserMessageId
