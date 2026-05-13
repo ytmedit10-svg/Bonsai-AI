@@ -6,7 +6,11 @@ import { modelRuns } from "../db/schema.js";
 
 const env = loadEnv();
 
-type RunType = "chat_response" | "merge_generation" | "summary_generation";
+type RunType =
+  | "chat_response"
+  | "merge_generation"
+  | "path_compaction"
+  | "summary_generation";
 type CacheMode = "none" | "implicit" | "explicit";
 type RunStatus = "queued" | "started" | "completed" | "failed";
 

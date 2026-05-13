@@ -3,21 +3,29 @@ import type { Message } from "../db/schema.js";
 import {
   MissingGeminiApiKeyError,
   generateMergeArtifact as generateGeminiMergeArtifact,
+  generatePathCompaction as generateGeminiPathCompaction,
   generateConversationTitle as generateGeminiConversationTitle,
   generatePathReply as generateGeminiPathReply,
   streamPathReply as streamGeminiPathReply
 } from "./gemini-adapter.js";
 import {
-  MissingGroqApiKeyError,
-  generateMergeArtifact as generateGroqMergeArtifact,
-  generateConversationTitle as generateGroqConversationTitle,
-  generatePathReply as generateGroqPathReply,
-  streamPathReply as streamGroqPathReply
-} from "./groq-adapter.js";
+  generateMergeArtifact as generateMockMergeArtifact,
+  generatePathCompaction as generateMockPathCompaction,
+  generateConversationTitle as generateMockConversationTitle,
+  generatePathReply as generateMockPathReply,
+  streamPathReply as streamMockPathReply
+} from "./mock-ai-adapter.js";
+import {
+  generateMergeArtifact as generateOllamaMergeArtifact,
+  generatePathCompaction as generateOllamaPathCompaction,
+  generateConversationTitle as generateOllamaConversationTitle,
+  generatePathReply as generateOllamaPathReply,
+  streamPathReply as streamOllamaPathReply
+} from "./ollama-adapter.js";
 
 const env = loadEnv();
 
-type ModelProvider = "google" | "groq";
+type ModelProvider = "google" | "mock" | "ollama";
 
 type UsageMetadata = {
   cachedTokens?: number | null;
@@ -29,10 +37,16 @@ type UsageMetadata = {
 type GeneratePathReplyInput = {
   history: Message[];
   inheritedSnapshotText?: string | null;
+  memoryContextText?: string | null;
+  modelName?: string | null;
+  thinkingEnabled?: boolean;
+  webSearchEnabled?: boolean;
 };
 
 type GenerateMergeArtifactInput = {
   mergeMode: "light" | "full" | "reference" | "collapse";
+  modelName?: string | null;
+  thinkingEnabled?: boolean;
   sourcePathTitle: string;
   targetPathTitle: string;
   inheritedSnapshotText?: string | null;
@@ -42,12 +56,29 @@ type GenerateMergeArtifactInput = {
 
 type GenerateConversationTitleInput = {
   messages: Message[];
+  modelName?: string | null;
+  thinkingEnabled?: boolean;
+};
+
+type GeneratePathCompactionInput = {
+  modelName?: string | null;
+  thinkingEnabled?: boolean;
+  pathTitle: string;
+  previousCompactionText?: string | null;
+  sourceMessages: Message[];
 };
 
 export class MissingAiProviderApiKeyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "MissingAiProviderApiKeyError";
+  }
+}
+
+export class AiProviderCapabilityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AiProviderCapabilityError";
   }
 }
 
@@ -58,11 +89,19 @@ export const getActiveInferenceProfile = () => {
 };
 
 const getInferenceProfile = (provider: ModelProvider) => {
-  if (provider === "groq") {
+  if (provider === "mock") {
     return {
       provider,
-      chatModel: env.GROQ_DEFAULT_MODEL,
-      mergeModel: env.GROQ_MERGE_MODEL
+      chatModel: env.GEMINI_DEFAULT_MODEL,
+      mergeModel: env.GEMINI_MERGE_MODEL
+    };
+  }
+
+  if (provider === "ollama") {
+    return {
+      provider,
+      chatModel: env.OLLAMA_MODEL,
+      mergeModel: env.OLLAMA_MERGE_MODEL
     };
   }
 
@@ -74,29 +113,19 @@ const getInferenceProfile = (provider: ModelProvider) => {
 };
 
 const resolveProvider = (): ModelProvider => {
-  if (env.AI_PROVIDER === "groq") {
-    return "groq";
+  if (env.AI_PROVIDER === "mock") {
+    return "mock";
   }
 
-  if (env.AI_PROVIDER === "gemini") {
-    return "google";
+  if (env.AI_PROVIDER === "ollama") {
+    return "ollama";
   }
 
-  if (env.GEMINI_API_KEY) {
-    return "google";
-  }
-
-  return env.GROQ_API_KEY ? "groq" : "google";
+  return "google";
 };
 
-const canFallbackToGroq = (provider: ModelProvider) =>
-  env.AI_PROVIDER === "auto" && provider === "google" && Boolean(env.GROQ_API_KEY);
-
 const normalizeMissingKeyError = (error: unknown): never => {
-  if (
-    error instanceof MissingGeminiApiKeyError ||
-    error instanceof MissingGroqApiKeyError
-  ) {
+  if (error instanceof MissingGeminiApiKeyError) {
     throw new MissingAiProviderApiKeyError(error.message);
   }
 
@@ -107,11 +136,28 @@ export const generatePathReply = async (input: GeneratePathReplyInput) => {
   const provider = resolveProvider();
 
   try {
-    if (provider === "groq") {
-      const result = await generateGroqPathReply(input);
+    if (provider === "mock") {
+      const result = await generateMockPathReply(input);
 
       return {
         ...result,
+        usage: result.usage as UsageMetadata | undefined,
+        modelProvider: provider
+      };
+    }
+
+    if (provider === "ollama") {
+      if (input.webSearchEnabled) {
+        throw new AiProviderCapabilityError(
+          "Web search requires the Gemini provider with Google Search grounding."
+        );
+      }
+
+      const result = await generateOllamaPathReply(input);
+
+      return {
+        ...result,
+        groundingMetadata: null,
         usage: result.usage as UsageMetadata | undefined,
         modelProvider: provider
       };
@@ -125,20 +171,6 @@ export const generatePathReply = async (input: GeneratePathReplyInput) => {
       modelProvider: provider
     };
   } catch (error) {
-    if (canFallbackToGroq(provider)) {
-      try {
-        const result = await generateGroqPathReply(input);
-
-        return {
-          ...result,
-          usage: result.usage as UsageMetadata | undefined,
-          modelProvider: "groq" satisfies ModelProvider
-        };
-      } catch (fallbackError) {
-        return normalizeMissingKeyError(fallbackError);
-      }
-    }
-
     return normalizeMissingKeyError(error);
   }
 };
@@ -147,11 +179,30 @@ export const streamPathReply = async (input: GeneratePathReplyInput) => {
   const provider = resolveProvider();
 
   try {
-    if (provider === "groq") {
-      const result = await streamGroqPathReply(input);
+    if (provider === "mock") {
+      const result = await streamMockPathReply(input);
 
       return {
         ...result,
+        usage: result.usage as UsageMetadata | undefined,
+        modelProvider: provider
+      };
+    }
+
+    if (provider === "ollama") {
+      if (input.webSearchEnabled) {
+        throw new AiProviderCapabilityError(
+          "Web search requires the Gemini provider with Google Search grounding."
+        );
+      }
+
+      const result = await streamOllamaPathReply(input);
+
+      return {
+        ...result,
+        groundingMetadata: {
+          current: null
+        },
         usage: result.usage as UsageMetadata | undefined,
         modelProvider: provider
       };
@@ -165,20 +216,6 @@ export const streamPathReply = async (input: GeneratePathReplyInput) => {
       modelProvider: provider
     };
   } catch (error) {
-    if (canFallbackToGroq(provider)) {
-      try {
-        const result = await streamGroqPathReply(input);
-
-        return {
-          ...result,
-          usage: result.usage as UsageMetadata | undefined,
-          modelProvider: "groq" satisfies ModelProvider
-        };
-      } catch (fallbackError) {
-        return normalizeMissingKeyError(fallbackError);
-      }
-    }
-
     return normalizeMissingKeyError(error);
   }
 };
@@ -187,8 +224,18 @@ export const generateMergeArtifact = async (input: GenerateMergeArtifactInput) =
   const provider = resolveProvider();
 
   try {
-    if (provider === "groq") {
-      const result = await generateGroqMergeArtifact(input);
+    if (provider === "mock") {
+      const result = await generateMockMergeArtifact(input);
+
+      return {
+        ...result,
+        usage: result.usage as UsageMetadata | undefined,
+        modelProvider: provider
+      };
+    }
+
+    if (provider === "ollama") {
+      const result = await generateOllamaMergeArtifact(input);
 
       return {
         ...result,
@@ -205,20 +252,42 @@ export const generateMergeArtifact = async (input: GenerateMergeArtifactInput) =
       modelProvider: provider
     };
   } catch (error) {
-    if (canFallbackToGroq(provider)) {
-      try {
-        const result = await generateGroqMergeArtifact(input);
+    return normalizeMissingKeyError(error);
+  }
+};
 
-        return {
-          ...result,
-          usage: result.usage as UsageMetadata | undefined,
-          modelProvider: "groq" satisfies ModelProvider
-        };
-      } catch (fallbackError) {
-        return normalizeMissingKeyError(fallbackError);
-      }
+export const generatePathCompaction = async (input: GeneratePathCompactionInput) => {
+  const provider = resolveProvider();
+
+  try {
+    if (provider === "mock") {
+      const result = await generateMockPathCompaction(input);
+
+      return {
+        ...result,
+        usage: result.usage as UsageMetadata | undefined,
+        modelProvider: provider
+      };
     }
 
+    if (provider === "ollama") {
+      const result = await generateOllamaPathCompaction(input);
+
+      return {
+        ...result,
+        usage: result.usage as UsageMetadata | undefined,
+        modelProvider: provider
+      };
+    }
+
+    const result = await generateGeminiPathCompaction(input);
+
+    return {
+      ...result,
+      usage: result.usage as UsageMetadata | undefined,
+      modelProvider: provider
+    };
+  } catch (error) {
     return normalizeMissingKeyError(error);
   }
 };
@@ -227,8 +296,18 @@ export const generateConversationTitle = async (input: GenerateConversationTitle
   const provider = resolveProvider();
 
   try {
-    if (provider === "groq") {
-      const result = await generateGroqConversationTitle(input);
+    if (provider === "mock") {
+      const result = await generateMockConversationTitle(input);
+
+      return {
+        ...result,
+        usage: result.usage as UsageMetadata | undefined,
+        modelProvider: provider
+      };
+    }
+
+    if (provider === "ollama") {
+      const result = await generateOllamaConversationTitle(input);
 
       return {
         ...result,
@@ -245,20 +324,6 @@ export const generateConversationTitle = async (input: GenerateConversationTitle
       modelProvider: provider
     };
   } catch (error) {
-    if (canFallbackToGroq(provider)) {
-      try {
-        const result = await generateGroqConversationTitle(input);
-
-        return {
-          ...result,
-          usage: result.usage as UsageMetadata | undefined,
-          modelProvider: "groq" satisfies ModelProvider
-        };
-      } catch (fallbackError) {
-        return normalizeMissingKeyError(fallbackError);
-      }
-    }
-
     return normalizeMissingKeyError(error);
   }
 };

@@ -4,7 +4,7 @@ import { defineConfig } from "drizzle-kit";
 
 const databaseUrl =
   process.env.DATABASE_URL ??
-  "postgresql://postgres:postgres@localhost:5432/node_based_chat";
+  "postgres://postgres@localhost:5432/node_based_chat";
 
 export default defineConfig({
   out: "./apps/api/drizzle",

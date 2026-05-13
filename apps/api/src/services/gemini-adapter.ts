@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, type GenerateContentConfig } from "@google/genai";
 
 import { loadEnv } from "../config/env.js";
 import type { Message } from "../db/schema.js";
@@ -15,6 +15,8 @@ Continue the active path faithfully.
 Use the path's prior messages as its working memory.
 Answer clearly, directly, and helpfully.
 Do not claim knowledge from parent or sibling branches unless it appears in the provided path history.
+If you cite internal context inline, use only labels visible in the provided context, such as [Retrieved context 1] or [Merge memory 1].
+Do not invent citation labels.
 `.trim();
 
 const MERGE_SYSTEM_INSTRUCTION = `
@@ -23,6 +25,15 @@ Your job is to turn a branch into memory that can be attached to the main path.
 Preserve important decisions, useful conclusions, and unresolved questions.
 Do not copy long transcripts unless the merge mode explicitly asks for fuller detail.
 Write the result so the main path can reuse it as future memory.
+`.trim();
+
+const COMPACTION_SYSTEM_INSTRUCTION = `
+You create durable path memory for a node-based chat workspace.
+Compress older messages from one active path into concise memory for future turns on that same path.
+Preserve user goals, preferences, decisions, constraints, implemented changes, unresolved questions, and important facts.
+Do not introduce knowledge from parent paths, sibling branches, or other conversations.
+Do not include filler, greetings, or long transcript copies.
+Write structured memory that can be safely prepended to future model context.
 `.trim();
 
 const TITLE_SYSTEM_INSTRUCTION = `
@@ -45,6 +56,45 @@ export class MissingGeminiApiKeyError extends Error {
     this.name = "MissingGeminiApiKeyError";
   }
 }
+
+export class GeminiProviderError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "GeminiProviderError";
+    this.status = status;
+  }
+}
+
+const resolveGeminiModelName = (
+  requestedModelName?: string | null,
+  fallbackModelName = env.GEMINI_DEFAULT_MODEL
+) => {
+  const requested = requestedModelName?.trim();
+
+  if (!requested) {
+    return fallbackModelName;
+  }
+
+  const allowedModels = new Set(env.GEMINI_AVAILABLE_MODELS);
+
+  if (!allowedModels.has(requested)) {
+    throw new GeminiProviderError(
+      400,
+      `The selected hosted model "${requested}" is not listed in GEMINI_AVAILABLE_MODELS.`
+    );
+  }
+
+  return requested;
+};
+
+const createThinkingConfig = (thinkingEnabled?: boolean) => ({
+  thinkingConfig: {
+    includeThoughts: false,
+    thinkingBudget: thinkingEnabled ? -1 : 0
+  }
+});
 
 const getErrorStatusCode = (error: unknown) => {
   if (!error || typeof error !== "object" || !("status" in error)) {
@@ -122,6 +172,10 @@ const toGeminiContents = (history: Message[]) => {
 type GeneratePathReplyInput = {
   history: Message[];
   inheritedSnapshotText?: string | null;
+  memoryContextText?: string | null;
+  modelName?: string | null;
+  thinkingEnabled?: boolean;
+  webSearchEnabled?: boolean;
 };
 
 type UsageMetadata = {
@@ -131,8 +185,12 @@ type UsageMetadata = {
   totalTokens: number | null;
 };
 
+type GroundingMetadata = Record<string, unknown>;
+
 type GenerateMergeArtifactInput = {
   mergeMode: "light" | "full" | "reference" | "collapse";
+  modelName?: string | null;
+  thinkingEnabled?: boolean;
   sourcePathTitle: string;
   targetPathTitle: string;
   inheritedSnapshotText?: string | null;
@@ -142,25 +200,58 @@ type GenerateMergeArtifactInput = {
 
 type GenerateConversationTitleInput = {
   messages: Message[];
+  modelName?: string | null;
+  thinkingEnabled?: boolean;
 };
+
+type GeneratePathCompactionInput = {
+  modelName?: string | null;
+  pathTitle: string;
+  previousCompactionText?: string | null;
+  sourceMessages: Message[];
+  thinkingEnabled?: boolean;
+};
+
+const buildPathMemoryContextText = (memoryContextText: string) =>
+  [
+    "Active path compacted memory:",
+    "",
+    memoryContextText.trim(),
+    "",
+    "This compacted memory belongs only to the active path. Do not treat it as parent-path or sibling-branch memory."
+  ].join("\n");
 
 const withSnapshotContext = ({
   history,
-  inheritedSnapshotText
+  inheritedSnapshotText,
+  memoryContextText
 }: GeneratePathReplyInput) => {
-  if (!inheritedSnapshotText?.trim()) {
-    return toGeminiContents(history);
-  }
+  const contextContents = [];
 
-  return [
-    {
+  if (inheritedSnapshotText?.trim()) {
+    contextContents.push({
       role: "user" as const,
       parts: [
         {
           text: buildSplitSnapshotContextText(inheritedSnapshotText)
         }
       ]
-    },
+    });
+  }
+
+  if (memoryContextText?.trim()) {
+    contextContents.push({
+      role: "user" as const,
+      parts: [
+        {
+          text: buildPathMemoryContextText(memoryContextText)
+        }
+      ]
+    });
+  }
+
+  return [
+    ...contextContents,
     ...toGeminiContents(history)
   ];
 };
@@ -204,22 +295,81 @@ const extractUsageMetadata = (value: unknown): UsageMetadata => {
   };
 };
 
+const extractGroundingMetadata = (value: unknown): GroundingMetadata | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidates =
+    "candidates" in value && Array.isArray(value.candidates) ? value.candidates : [];
+
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object") {
+      continue;
+    }
+
+    const groundingMetadata =
+      "groundingMetadata" in candidate &&
+      candidate.groundingMetadata &&
+      typeof candidate.groundingMetadata === "object"
+        ? candidate.groundingMetadata
+        : null;
+
+    if (groundingMetadata) {
+      return groundingMetadata as GroundingMetadata;
+    }
+  }
+
+  return null;
+};
+
+const withGoogleSearchTool = (
+  config: GenerateContentConfig,
+  webSearchEnabled?: boolean
+): GenerateContentConfig => {
+  if (!webSearchEnabled) {
+    return config;
+  }
+
+  return {
+    ...config,
+    tools: [
+      ...(config.tools ?? []),
+      {
+        googleSearch: {}
+      }
+    ]
+  };
+};
+
 const buildPathGenerationRequest = async ({
   ai,
   history,
-  inheritedSnapshotText
+  inheritedSnapshotText,
+  memoryContextText,
+  modelName,
+  thinkingEnabled,
+  webSearchEnabled
 }: GeneratePathReplyInput & { ai: GoogleGenAI }) => {
   const normalizedSnapshot = inheritedSnapshotText?.trim() ?? "";
+  const normalizedMemory = memoryContextText?.trim() ?? "";
 
   if (!normalizedSnapshot) {
     return {
       cacheMode: "implicit" as const,
       cacheRecordId: null as string | null,
       cachedTokensHint: null as number | null,
-      contents: toGeminiContents(history),
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION
-      }
+      contents: withSnapshotContext({
+        history,
+        memoryContextText: normalizedMemory
+      }),
+      config: withGoogleSearchTool(
+        {
+          ...createThinkingConfig(thinkingEnabled),
+          systemInstruction: SYSTEM_INSTRUCTION
+        },
+        webSearchEnabled
+      )
     };
   }
 
@@ -227,7 +377,7 @@ const buildPathGenerationRequest = async ({
   const cachePlan = await resolveSplitSnapshotCache({
     ai,
     conversationId: latestMessage?.conversationId ?? null,
-    modelName: env.GEMINI_DEFAULT_MODEL,
+    modelName: resolveGeminiModelName(modelName),
     pathId: latestMessage?.pathId ?? null,
     snapshotText: normalizedSnapshot,
     systemInstruction: SYSTEM_INSTRUCTION
@@ -238,10 +388,17 @@ const buildPathGenerationRequest = async ({
       cacheMode: "explicit" as const,
       cacheRecordId: cachePlan.cacheRecordId,
       cachedTokensHint: cachePlan.tokenEstimate,
-      contents: toGeminiContents(history),
-      config: {
-        cachedContent: cachePlan.cachedContentName
-      }
+      contents: withSnapshotContext({
+        history,
+        memoryContextText: normalizedMemory
+      }),
+      config: withGoogleSearchTool(
+        {
+          ...createThinkingConfig(thinkingEnabled),
+          cachedContent: cachePlan.cachedContentName
+        },
+        webSearchEnabled
+      )
     };
   }
 
@@ -251,28 +408,42 @@ const buildPathGenerationRequest = async ({
     cachedTokensHint: null as number | null,
     contents: withSnapshotContext({
       history,
-      inheritedSnapshotText: normalizedSnapshot
+      inheritedSnapshotText: normalizedSnapshot,
+      memoryContextText: normalizedMemory
     }),
-    config: {
-      systemInstruction: SYSTEM_INSTRUCTION
-    }
+      config: withGoogleSearchTool(
+        {
+          ...createThinkingConfig(thinkingEnabled),
+          systemInstruction: SYSTEM_INSTRUCTION
+        },
+        webSearchEnabled
+      )
   };
 };
 
 export const generatePathReply = async ({
   history,
-  inheritedSnapshotText
+  inheritedSnapshotText,
+  memoryContextText,
+  modelName,
+  thinkingEnabled,
+  webSearchEnabled
 }: GeneratePathReplyInput) => {
   const ai = getClient();
+  const resolvedModelName = resolveGeminiModelName(modelName);
   const request = await buildPathGenerationRequest({
     ai,
     history,
-    inheritedSnapshotText
+    inheritedSnapshotText,
+    memoryContextText,
+    modelName: resolvedModelName,
+    thinkingEnabled,
+    webSearchEnabled
   });
 
   const response = await withRetry(() =>
     ai.models.generateContent({
-      model: env.GEMINI_DEFAULT_MODEL,
+      model: resolvedModelName,
       contents: request.contents,
       config: request.config
     })
@@ -282,7 +453,8 @@ export const generatePathReply = async ({
     cacheMode: request.cacheMode,
     cacheRecordId: request.cacheRecordId,
     cachedTokensHint: request.cachedTokensHint,
-    modelName: env.GEMINI_DEFAULT_MODEL,
+    groundingMetadata: extractGroundingMetadata(response),
+    modelName: resolvedModelName,
     text: response.text?.trim() ?? "",
     usage: extractUsageMetadata(response)
   };
@@ -290,18 +462,27 @@ export const generatePathReply = async ({
 
 export const streamPathReply = async ({
   history,
-  inheritedSnapshotText
+  inheritedSnapshotText,
+  memoryContextText,
+  modelName,
+  thinkingEnabled,
+  webSearchEnabled
 }: GeneratePathReplyInput) => {
   const ai = getClient();
+  const resolvedModelName = resolveGeminiModelName(modelName);
   const request = await buildPathGenerationRequest({
     ai,
     history,
-    inheritedSnapshotText
+    inheritedSnapshotText,
+    memoryContextText,
+    modelName: resolvedModelName,
+    thinkingEnabled,
+    webSearchEnabled
   });
 
   const rawStream = await withRetry(() =>
     ai.models.generateContentStream({
-      model: env.GEMINI_DEFAULT_MODEL,
+      model: resolvedModelName,
       contents: request.contents,
       config: request.config
     })
@@ -313,10 +494,18 @@ export const streamPathReply = async ({
     outputTokens: null,
     totalTokens: null
   };
+  const groundingMetadata: { current: GroundingMetadata | null } = {
+    current: null
+  };
 
   const stream = (async function* () {
     for await (const chunk of rawStream) {
       const extracted = extractUsageMetadata(chunk);
+      const extractedGroundingMetadata = extractGroundingMetadata(chunk);
+
+      if (extractedGroundingMetadata) {
+        groundingMetadata.current = extractedGroundingMetadata;
+      }
 
       if (extracted.inputTokens !== null) {
         usage.inputTokens = extracted.inputTokens;
@@ -341,7 +530,8 @@ export const streamPathReply = async ({
   return {
     cacheMode: request.cacheMode,
     cacheRecordId: request.cacheRecordId,
-    modelName: env.GEMINI_DEFAULT_MODEL,
+    groundingMetadata,
+    modelName: resolvedModelName,
     stream,
     usage
   };
@@ -378,6 +568,78 @@ const formatTranscript = (label: string, history: Message[]) => {
           `${message.role.toUpperCase()} [${message.createdAt.toISOString()}]: ${message.contentText}`
       )
   ].join("\n");
+};
+
+const buildCompactionPrompt = ({
+  pathTitle,
+  previousCompactionText,
+  sourceMessages
+}: GeneratePathCompactionInput) => {
+  const transcript = sourceMessages
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .map(
+      (message) =>
+        `${message.role.toUpperCase()} #${message.sequenceNo} [${message.createdAt.toISOString()}]: ${message.contentText}`
+    )
+    .join("\n\n");
+
+  return [
+    `Path title: ${pathTitle}`,
+    previousCompactionText?.trim()
+      ? `Existing compacted memory to update:\n${previousCompactionText.trim()}`
+      : "Existing compacted memory to update: none",
+    "New source messages to fold into the path memory:",
+    transcript || "(No source messages)",
+    "",
+    "Return only the updated compacted memory. Use short markdown sections:",
+    "- Stable context",
+    "- User preferences and constraints",
+    "- Decisions and completed work",
+    "- Current open questions or next steps",
+    "",
+    "Keep it compact but specific. Preserve details that future turns on this same path need."
+  ].join("\n\n");
+};
+
+export const generatePathCompaction = async ({
+  modelName,
+  pathTitle,
+  previousCompactionText,
+  sourceMessages,
+  thinkingEnabled
+}: GeneratePathCompactionInput) => {
+  const ai = getClient();
+  const resolvedModelName = resolveGeminiModelName(modelName, env.GEMINI_MERGE_MODEL);
+
+  const response = await withRetry(() =>
+    ai.models.generateContent({
+      model: resolvedModelName,
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: buildCompactionPrompt({
+                pathTitle,
+                previousCompactionText,
+                sourceMessages
+              })
+            }
+          ]
+        }
+      ],
+      config: {
+        ...createThinkingConfig(thinkingEnabled),
+        systemInstruction: COMPACTION_SYSTEM_INSTRUCTION
+      }
+    })
+  );
+
+  return {
+    modelName: resolvedModelName,
+    text: response.text?.trim() ?? "",
+    usage: extractUsageMetadata(response)
+  };
 };
 
 const buildMergePrompt = ({
@@ -420,17 +682,20 @@ const buildMergePrompt = ({
 
 export const generateMergeArtifact = async ({
   mergeMode,
+  modelName,
   sourcePathTitle,
   targetPathTitle,
   inheritedSnapshotText,
   sourceMessages,
-  targetMessages = []
+  targetMessages = [],
+  thinkingEnabled
 }: GenerateMergeArtifactInput) => {
   const ai = getClient();
+  const resolvedModelName = resolveGeminiModelName(modelName, env.GEMINI_MERGE_MODEL);
 
   const response = await withRetry(() =>
     ai.models.generateContent({
-      model: env.GEMINI_MERGE_MODEL,
+      model: resolvedModelName,
       contents: [
         {
           role: "user",
@@ -449,13 +714,14 @@ export const generateMergeArtifact = async ({
         }
       ],
       config: {
+        ...createThinkingConfig(thinkingEnabled),
         systemInstruction: MERGE_SYSTEM_INSTRUCTION
       }
     })
   );
 
   return {
-    modelName: env.GEMINI_MERGE_MODEL,
+    modelName: resolvedModelName,
     text: response.text?.trim() ?? "",
     usage: extractUsageMetadata(response)
   };
@@ -478,13 +744,16 @@ const buildTitlePrompt = (messages: Message[]) => {
 };
 
 export const generateConversationTitle = async ({
-  messages
+  messages,
+  modelName,
+  thinkingEnabled
 }: GenerateConversationTitleInput) => {
   const ai = getClient();
+  const resolvedModelName = resolveGeminiModelName(modelName);
 
   const response = await withRetry(() =>
     ai.models.generateContent({
-      model: env.GEMINI_DEFAULT_MODEL,
+      model: resolvedModelName,
       contents: [
         {
           role: "user",
@@ -496,13 +765,14 @@ export const generateConversationTitle = async ({
         }
       ],
       config: {
+        ...createThinkingConfig(thinkingEnabled),
         systemInstruction: TITLE_SYSTEM_INSTRUCTION
       }
     })
   );
 
   return {
-    modelName: env.GEMINI_DEFAULT_MODEL,
+    modelName: resolvedModelName,
     text: response.text?.trim() ?? "",
     usage: extractUsageMetadata(response)
   };

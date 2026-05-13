@@ -67,12 +67,16 @@ const fallbackTitleFromMessages = (pathMessages: Message[]) => {
 
 type MaybeGenerateConversationTitleInput = {
   conversationId: string;
+  modelName?: string | null;
+  thinkingEnabled?: boolean;
   pathId: string;
   userId: string;
 };
 
 export const maybeGenerateConversationTitle = async ({
   conversationId,
+  modelName,
+  thinkingEnabled,
   pathId,
   userId
 }: MaybeGenerateConversationTitleInput) => {
@@ -113,7 +117,9 @@ export const maybeGenerateConversationTitle = async ({
 
   try {
     const generated = await generateConversationTitle({
-      messages: pathMessages
+      messages: pathMessages,
+      modelName,
+      thinkingEnabled
     });
     title = sanitizeTitle(generated.text) ?? title;
   } catch {

@@ -171,6 +171,52 @@ export const messages = pgTable(
   })
 );
 
+export const attachments = pgTable(
+  "attachments",
+  {
+    id: uuid("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    pathId: uuid("path_id")
+      .notNull()
+      .references(() => paths.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id").references(() => messages.id, {
+      onDelete: "set null"
+    }),
+    createdByUserId: uuid("created_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    originalName: text("original_name").notNull(),
+    mimeType: text("mime_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    kind: text("kind").notNull().default("file"),
+    storageProvider: text("storage_provider").notNull().default("local"),
+    storageKey: text("storage_key").notNull(),
+    thumbnailStorageKey: text("thumbnail_storage_key"),
+    status: text("status").notNull().default("uploaded"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+  },
+  (table) => ({
+    attachmentsConversationCreatedIdx: index(
+      "attachments_conversation_created_idx"
+    ).on(table.conversationId, table.createdAt),
+    attachmentsMessageIdx: index("attachments_message_idx").on(table.messageId),
+    attachmentsPathStatusIdx: index("attachments_path_status_idx").on(
+      table.pathId,
+      table.status
+    ),
+    attachmentsStorageKeyUnique: uniqueIndex("attachments_storage_key_unique").on(
+      table.storageKey
+    )
+  })
+);
+
 export const pathSnapshots = pgTable(
   "path_snapshots",
   {
@@ -324,6 +370,88 @@ export const cacheRecords = pgTable(
   })
 );
 
+export const jobs = pgTable(
+  "jobs",
+  {
+    id: uuid("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    jobType: text("job_type").notNull(),
+    status: text("status").notNull().default("queued"),
+    dedupeKey: text("dedupe_key"),
+    payloadJson: jsonb("payload_json"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    runAfter: timestamp("run_after", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lockedAt: timestamp("locked_at", { withTimezone: true }),
+    lockedBy: text("locked_by"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    errorText: text("error_text"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+  },
+  (table) => ({
+    jobsDedupeStatusIdx: index("jobs_dedupe_status_idx").on(
+      table.dedupeKey,
+      table.status
+    ),
+    jobsLockedAtIdx: index("jobs_locked_at_idx").on(table.lockedAt),
+    jobsStatusRunAfterIdx: index("jobs_status_run_after_idx").on(
+      table.status,
+      table.runAfter,
+      table.createdAt
+    )
+  })
+);
+
+export const embeddingRecords = pgTable(
+  "embedding_records",
+  {
+    id: uuid("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    sourceType: text("source_type").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    pathId: uuid("path_id").references(() => paths.id, {
+      onDelete: "cascade"
+    }),
+    visibility: text("visibility").notNull().default("conversation"),
+    contentText: text("content_text").notNull(),
+    contentHash: text("content_hash").notNull(),
+    embeddingModel: text("embedding_model").notNull(),
+    embeddingDimensions: integer("embedding_dimensions").notNull(),
+    embeddingJson: jsonb("embedding_json").notNull(),
+    tokenEstimate: integer("token_estimate"),
+    metadataJson: jsonb("metadata_json"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+  },
+  (table) => ({
+    embeddingRecordsConversationPathIdx: index(
+      "embedding_records_conversation_path_idx"
+    ).on(table.conversationId, table.pathId),
+    embeddingRecordsSourceIdx: index("embedding_records_source_idx").on(
+      table.sourceType,
+      table.sourceId
+    ),
+    embeddingRecordsSourceModelUnique: uniqueIndex(
+      "embedding_records_source_model_unique"
+    ).on(table.sourceType, table.sourceId, table.embeddingModel),
+    embeddingRecordsVisibilityIdx: index("embedding_records_visibility_idx").on(
+      table.visibility
+    )
+  })
+);
+
 export const modelRuns = pgTable(
   "model_runs",
   {
@@ -392,6 +520,9 @@ export type NewConversationShare = typeof conversationShares.$inferInsert;
 export type Message = typeof messages.$inferSelect;
 export type NewMessage = typeof messages.$inferInsert;
 
+export type Attachment = typeof attachments.$inferSelect;
+export type NewAttachment = typeof attachments.$inferInsert;
+
 export type PathSnapshot = typeof pathSnapshots.$inferSelect;
 export type NewPathSnapshot = typeof pathSnapshots.$inferInsert;
 
@@ -403,6 +534,12 @@ export type NewMerge = typeof merges.$inferInsert;
 
 export type CacheRecord = typeof cacheRecords.$inferSelect;
 export type NewCacheRecord = typeof cacheRecords.$inferInsert;
+
+export type Job = typeof jobs.$inferSelect;
+export type NewJob = typeof jobs.$inferInsert;
+
+export type EmbeddingRecord = typeof embeddingRecords.$inferSelect;
+export type NewEmbeddingRecord = typeof embeddingRecords.$inferInsert;
 
 export type ModelRun = typeof modelRuns.$inferSelect;
 export type NewModelRun = typeof modelRuns.$inferInsert;

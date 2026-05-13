@@ -11,13 +11,16 @@ Build output lives in `apps/*/dist`. Database migrations are generated into `app
 
 ## Build, Test, and Development Commands
 - `npm run dev`: runs web and API together.
+- `npm run dev:local`: runs the local Ollama/native Postgres/local upload mode.
+- `npm run dev:hosted`: runs with hosted env expectations such as Gemini, hosted Postgres, and R2.
 - `npm run dev:web`: starts the Vite frontend only.
 - `npm run dev:api`: starts the Fastify API with `tsx watch`.
 - `npm run build`: builds all workspaces that expose a build script.
 - `npm run typecheck`: runs strict TypeScript checks across the workspace.
 - `npm run db:generate`: creates Drizzle migration files from `apps/api/src/db/schema.ts`.
 - `npm run db:migrate`: applies migrations using `drizzle.config.ts`.
-- `docker compose up -d postgres`: starts the local PostgreSQL dependency.
+- `npm run setup:postgres:windows`: installs/finds native PostgreSQL on Windows, enables passwordless local auth, restarts the service, and tests `psql`.
+- Native local PostgreSQL should be running with passwordless local auth; the default `DATABASE_URL` is `postgres://postgres@localhost:5432/node_based_chat`.
 
 ## Coding Style & Naming Conventions
 Use TypeScript with strict mode enabled. Follow the existing style: double quotes, semicolons, and concise typed helpers. Use `PascalCase` for React components, `camelCase` for variables/functions, and kebab-case filenames for API modules such as `conversation-service.ts` or `bootstrap-user-service.ts`. Keep shared types/constants in `packages/shared` instead of duplicating them between apps.

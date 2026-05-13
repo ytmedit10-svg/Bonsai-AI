@@ -8,26 +8,8 @@ import {
   type PointerEvent,
   type WheelEvent
 } from "react";
-
-type GraphPath = {
-  createdAt: string;
-  depth: number;
-  id: string;
-  isMain: boolean;
-  parentPathId: string | null;
-  pathType: string;
-  splitMessageCreatedAt: string | null;
-  splitMessagePreview: string | null;
-  splitMessageSequenceNo: number | null;
-  title: string;
-};
-
-type BranchGraphProps = {
-  activePathId: string | null;
-  mainTitle?: string;
-  onSelectPath: (pathId: string) => void;
-  paths: GraphPath[];
-};
+import type { BranchGraphProps, GraphPath, GraphTopology } from "./graph-types";
+import { MobileGraph } from "./MobileGraph";
 
 type Point = {
   x: number;
@@ -80,14 +62,6 @@ type ViewportTransform = {
 
 type GraphOrientation = "horizontal" | "vertical";
 
-type GraphTopology = {
-  activeLineage: Set<string>;
-  childrenByParentId: Map<string, GraphPath[]>;
-  main: GraphPath;
-  mainChildren: GraphPath[];
-  sortedPaths: GraphPath[];
-};
-
 type PanSession = {
   hasMoved: boolean;
   lastX: number;
@@ -133,18 +107,18 @@ const BRANCH_DEPTH_LENGTH = 70;
 const BRANCH_BASE_OFFSET = 150;
 const BRANCH_PAIR_OFFSET = 82;
 const BRANCH_DEPTH_OFFSET = 58;
-const MOBILE_CARD_WIDTH = 176;
-const MOBILE_MAIN_CARD_WIDTH = 170;
-const MOBILE_NODE_GAP_Y = 148;
-const MOBILE_LANE_GAP_X = 126;
-const MOBILE_PADDING_X = 44;
-const MOBILE_PADDING_Y = 56;
-const MOBILE_CONNECTOR_GUTTER = 18;
+const MOBILE_CARD_WIDTH = 144;
+const MOBILE_MAIN_CARD_WIDTH = 140;
+const MOBILE_NODE_GAP_Y = 120;
+const MOBILE_LANE_GAP_X = 96;
+const MOBILE_PADDING_X = 24;
+const MOBILE_PADDING_Y = 36;
+const MOBILE_CONNECTOR_GUTTER = 14;
 const MOBILE_MAX_VISIBLE_SIDE_LANES = 2;
-const MOBILE_MIN_CANVAS_HEIGHT = 960;
-const MOBILE_MIN_CANVAS_WIDTH = 560;
-const MOBILE_MAIN_CARD_HEIGHT = 72;
-const MOBILE_BRANCH_CARD_HEIGHT = 76;
+const MOBILE_MIN_CANVAS_HEIGHT = 720;
+const MOBILE_MIN_CANVAS_WIDTH = 400;
+const MOBILE_MAIN_CARD_HEIGHT = 62;
+const MOBILE_BRANCH_CARD_HEIGHT = 66;
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 2.25;
 const FIT_PADDING = 88;
@@ -338,6 +312,11 @@ const writeStoredViewport = (
     // localStorage can fail in private mode or when quota is exceeded.
   }
 };
+
+const getGraphStorageScope = (
+  conversationId: string | null | undefined,
+  mainPath: GraphPath | null
+) => conversationId?.trim() || mainPath?.id || null;
 
 const getChildrenByParentId = (paths: GraphPath[]) => {
   const childrenByParentId = new Map<string, GraphPath[]>();
@@ -989,8 +968,9 @@ const buildGraphLayout = (
     : buildDesktopGraphLayout(topology, activePathId, nodePositionOverrides);
 };
 
-export const BranchGraph = ({
+const DesktopBranchGraph = ({
   activePathId,
+  conversationId,
   mainTitle,
   onSelectPath,
   paths
@@ -1004,8 +984,7 @@ export const BranchGraph = ({
   const skipNextPositionPersistRef = useRef(false);
   const skipNextViewportPersistRef = useRef(false);
   const suppressNextNavigationRef = useRef(false);
-  const isPhone = useMediaQuery(PHONE_MEDIA_QUERY);
-  const orientation: GraphOrientation = isPhone ? "vertical" : "horizontal";
+  const isPhone = false;
   const mainPathForStorage = useMemo(() => getMainPath(paths), [paths]);
   const storageKey = useMemo(
     () =>
@@ -1016,12 +995,17 @@ export const BranchGraph = ({
   );
   const viewportStorageKey = useMemo(
     () =>
-      mainPathForStorage
-        ? orientation === "vertical"
-          ? `${VIEWPORT_STORAGE_PREFIX}.${mainPathForStorage.id}.mobile-lanes`
-          : `${VIEWPORT_STORAGE_PREFIX}.${mainPathForStorage.id}`
+      getGraphStorageScope(conversationId, mainPathForStorage)
+        ? `${VIEWPORT_STORAGE_PREFIX}.${getGraphStorageScope(conversationId, mainPathForStorage)}`
         : null,
-    [mainPathForStorage, orientation]
+    [conversationId, mainPathForStorage]
+  );
+  const legacyViewportStorageKey = useMemo(
+    () =>
+      mainPathForStorage
+        ? `${VIEWPORT_STORAGE_PREFIX}.${mainPathForStorage.id}`
+        : null,
+    [mainPathForStorage]
   );
   const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
   const [nodePositions, setNodePositions] = useState<Record<string, Point>>(() => {
@@ -1037,6 +1021,7 @@ export const BranchGraph = ({
   const [viewport, setViewport] = useState<ViewportTransform>(
     () =>
       (viewportStorageKey ? readStoredViewport(viewportStorageKey) : null) ??
+      (legacyViewportStorageKey ? readStoredViewport(legacyViewportStorageKey) : null) ??
       DEFAULT_VIEWPORT
   );
   const [isPanning, setIsPanning] = useState(false);
@@ -1046,15 +1031,15 @@ export const BranchGraph = ({
       buildGraphLayout(
         paths,
         activePathId,
-        orientation === "vertical" ? {} : nodePositions,
-        orientation
+        nodePositions,
+        "horizontal"
       ),
-    [activePathId, nodePositions, orientation, paths]
+    [activePathId, nodePositions, paths]
   );
   const visibleMainTitle = mainTitle?.trim() || layout?.main.title || "Main chat";
   const layoutFitKey = useMemo(
-    () => `${orientation}:${paths.map((path) => path.id).sort().join("|")}`,
-    [orientation, paths]
+    () => `horizontal:${paths.map((path) => path.id).sort().join("|")}`,
+    [paths]
   );
 
   useEffect(() => {
@@ -1114,7 +1099,11 @@ export const BranchGraph = ({
       return;
     }
 
-    const storedViewport = readStoredViewport(viewportStorageKey);
+    const storedViewport =
+      readStoredViewport(viewportStorageKey) ??
+      (legacyViewportStorageKey && legacyViewportStorageKey !== viewportStorageKey
+        ? readStoredViewport(legacyViewportStorageKey)
+        : null);
 
     if (!storedViewport) {
       return;
@@ -1123,7 +1112,7 @@ export const BranchGraph = ({
     fittedLayoutKeyRef.current = layoutFitKey;
     skipNextViewportPersistRef.current = true;
     setViewport(storedViewport);
-  }, [layoutFitKey, viewportStorageKey]);
+  }, [layoutFitKey, legacyViewportStorageKey, viewportStorageKey]);
 
   useEffect(() => {
     if (!viewportStorageKey) {
@@ -1165,23 +1154,8 @@ export const BranchGraph = ({
       return;
     }
 
-    if (!isPhone) {
-      fitToView();
-      return;
-    }
-
-    const bounds = viewportRef.current.getBoundingClientRect();
-    const target = {
-      x: layout.mainLabel.x + MOBILE_MAIN_CARD_WIDTH / 2,
-      y: layout.mainLabel.y
-    };
-
-    setViewport({
-      scale: 1,
-      x: bounds.width / 2 - target.x,
-      y: bounds.height * 0.18 - target.y
-    });
-  }, [fitToView, isPhone, layout]);
+    fitToView();
+  }, [fitToView, layout]);
 
   useEffect(() => {
     if (fittedLayoutKeyRef.current === layoutFitKey) {
@@ -1193,12 +1167,6 @@ export const BranchGraph = ({
 
     return () => window.cancelAnimationFrame(frame);
   }, [focusInitialView, layoutFitKey]);
-
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(focusInitialView);
-
-    return () => window.cancelAnimationFrame(frame);
-  }, [focusInitialView, orientation]);
 
   useEffect(() => {
     const isTextEntryTarget = (target: EventTarget | null) => {
@@ -1588,7 +1556,7 @@ export const BranchGraph = ({
       className={[
         "branch-graph",
         isPhone ? "branch-graph--phone" : "",
-        orientation === "vertical" ? "branch-graph--vertical" : "branch-graph--horizontal"
+        "branch-graph--horizontal"
       ]
         .filter(Boolean)
         .join(" ")}
@@ -1649,17 +1617,10 @@ export const BranchGraph = ({
               width={layout.width}
             >
               <defs>
-                <filter id="branch-glow" x="-20%" y="-80%" width="140%" height="260%">
-                  <feGaussianBlur stdDeviation="4" result="blur" />
-                  <feMerge>
-                    <feMergeNode in="blur" />
-                    <feMergeNode in="SourceGraphic" />
-                  </feMerge>
-                </filter>
                 <linearGradient id="mainline-gradient" x1="0%" x2="100%" y1="0%" y2="0%">
-                  <stop offset="0%" stopColor="#00d2ff" stopOpacity="0.98" />
-                  <stop offset="34%" stopColor="#00d2ff" stopOpacity="0.62" />
-                  <stop offset="100%" stopColor="#2b3037" stopOpacity="0.88" />
+                  <stop offset="0%" stopColor="#53cdca" stopOpacity="0.98" />
+                  <stop offset="34%" stopColor="#53cdca" stopOpacity="0.62" />
+                  <stop offset="100%" stopColor="#343434" stopOpacity="0.88" />
                 </linearGradient>
               </defs>
 
@@ -1718,7 +1679,6 @@ export const BranchGraph = ({
                       .filter(Boolean)
                       .join(" ")}
                     d={route.d}
-                    filter={route.isOnActiveLineage ? "url(#branch-glow)" : undefined}
                   />
                   <circle
                     className={[
@@ -1818,4 +1778,10 @@ export const BranchGraph = ({
       </div>
     </section>
   );
+};
+
+export const BranchGraph = (props: BranchGraphProps) => {
+  const isPhone = useMediaQuery(PHONE_MEDIA_QUERY);
+
+  return isPhone ? <MobileGraph {...props} /> : <DesktopBranchGraph {...props} />;
 };

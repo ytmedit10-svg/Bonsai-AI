@@ -4,7 +4,7 @@ dist/
 .turbo/
 .env
 .env.local
+.runtime/
 .DS_Store
 coverage/
 *.log
-

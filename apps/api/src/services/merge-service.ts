@@ -18,6 +18,7 @@ import {
   failModelRun,
   startModelRun
 } from "./model-run-service.js";
+import { enqueueEmbeddingForSource } from "./embedding-service.js";
 import { createMergeMemoryMessage } from "./message-service.js";
 import { getLatestPathSnapshot } from "./path-service.js";
 
@@ -26,8 +27,10 @@ type MergeMode = "light" | "full" | "reference" | "collapse";
 type RequestMergeInput = {
   acknowledgeOutdated?: boolean;
   mergeMode: MergeMode;
+  modelName?: string | null;
   sourcePathId: string;
   targetPathId?: string | null;
+  thinkingEnabled?: boolean;
   userId: string;
 };
 
@@ -150,8 +153,10 @@ const getArtifactType = (mergeMode: MergeMode) =>
 export const requestMerge = async ({
   acknowledgeOutdated = false,
   mergeMode,
+  modelName,
   sourcePathId,
   targetPathId,
+  thinkingEnabled = false,
   userId
 }: RequestMergeInput) => {
   const sourcePath = await db
@@ -281,6 +286,8 @@ export const requestMerge = async ({
       requestPayloadJson: {
         hasSnapshot: Boolean(snapshot?.snapshotText),
         mergeMode,
+        selectedModelName: modelName ?? null,
+        thinkingEnabled,
         sourceMessageCount: sourceMessages.length,
         targetMessageWindow: targetMessages.length
       },
@@ -290,6 +297,8 @@ export const requestMerge = async ({
 
     const generated = await generateMergeArtifact({
       mergeMode,
+      modelName,
+      thinkingEnabled,
       inheritedSnapshotText: snapshot?.snapshotText ?? null,
       sourceMessages,
       sourcePathTitle: sourcePath.title,
@@ -330,6 +339,11 @@ export const requestMerge = async ({
         visibility: "conversation"
       })
       .returning();
+
+    void enqueueEmbeddingForSource({
+      sourceId: storedArtifact.id,
+      sourceType: "merge_artifact"
+    }).catch(() => undefined);
 
     const mergeMemoryMessage = await createMergeMemoryMessage({
       artifactId: storedArtifact.id,

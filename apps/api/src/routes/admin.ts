@@ -5,6 +5,13 @@ import { z } from "zod";
 import { loadEnv } from "../config/env.js";
 import { db } from "../db/client.js";
 import { modelRuns } from "../db/schema.js";
+import { ensureRequestUser } from "../services/bootstrap-user-service.js";
+import {
+  enqueueSingletonJob,
+  listJobs,
+  type JobStatus
+} from "../services/job-service.js";
+import { backfillConversationEmbeddings } from "../services/embedding-service.js";
 
 const env = loadEnv();
 
@@ -18,9 +25,29 @@ const runsQuerySchema = z.object({
   from: z.string().datetime().optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
   pathId: z.string().uuid().optional(),
-  runType: z.enum(["chat_response", "merge_generation", "summary_generation"]).optional(),
+  runType: z
+    .enum(["chat_response", "merge_generation", "path_compaction", "summary_generation"])
+    .optional(),
   status: z.enum(["queued", "started", "completed", "failed"]).optional(),
   to: z.string().datetime().optional()
+});
+
+const cleanupAttachmentsSchema = z.object({
+  limit: z.coerce.number().int().positive().max(500).default(50),
+  olderThanMinutes: z.coerce.number().int().positive().max(60 * 24 * 30).default(60)
+});
+
+const jobsQuerySchema = z.object({
+  limit: z.coerce.number().int().positive().max(200).default(100),
+  status: z.enum(["completed", "failed", "queued", "running"]).optional()
+});
+
+const retrievalBackfillSchema = z.object({
+  conversationId: z.string().uuid()
+});
+
+const runParamsSchema = z.object({
+  runId: z.string().uuid()
 });
 
 const toNumber = (value: unknown) => {
@@ -198,5 +225,93 @@ export const registerAdminRoutes = (server: FastifyInstance) => {
     return reply.send({
       runs
     });
+  });
+
+  server.get("/admin/observability/runs/:runId", async (request, reply) => {
+    if (!requireAdminAccess(request, reply)) {
+      return;
+    }
+
+    const params = runParamsSchema.parse(request.params);
+    const run = await db.query.modelRuns.findFirst({
+      where: eq(modelRuns.id, params.runId)
+    });
+
+    if (!run) {
+      return reply.code(404).send({
+        error: "Model run not found."
+      });
+    }
+
+    const requestPayload =
+      run.requestPayloadJson &&
+      typeof run.requestPayloadJson === "object" &&
+      !Array.isArray(run.requestPayloadJson)
+        ? (run.requestPayloadJson as Record<string, unknown>)
+        : {};
+    const contextBundle = requestPayload.contextBundle ?? null;
+
+    return reply.send({
+      run,
+      contextBundle,
+      requestPayload: run.requestPayloadJson ?? null,
+      responsePayload: run.responsePayloadJson ?? null
+    });
+  });
+
+  server.post("/admin/attachments/cleanup", async (request, reply) => {
+    if (!requireAdminAccess(request, reply)) {
+      return;
+    }
+
+    const body = cleanupAttachmentsSchema.parse(request.body ?? {});
+    const job = await enqueueSingletonJob({
+      dedupeKey: "maintenance:attachment_cleanup",
+      jobType: "attachment_cleanup",
+      maxAttempts: 5,
+      payloadJson: body
+    });
+
+    return reply.code(job.status === "queued" ? 202 : 200).send({
+      job,
+      status: "queued"
+    });
+  });
+
+  server.get("/admin/jobs", async (request, reply) => {
+    if (!requireAdminAccess(request, reply)) {
+      return;
+    }
+
+    const query = jobsQuerySchema.parse(request.query);
+    const jobs = await listJobs({
+      limit: query.limit,
+      status: query.status as JobStatus | undefined
+    });
+
+    return reply.send({
+      jobs
+    });
+  });
+
+  server.post("/admin/retrieval/backfill", async (request, reply) => {
+    if (!requireAdminAccess(request, reply)) {
+      return;
+    }
+
+    const body = retrievalBackfillSchema.parse(request.body ?? {});
+    const user = await ensureRequestUser(request);
+    const result = await backfillConversationEmbeddings({
+      conversationId: body.conversationId,
+      userId: user.id
+    });
+
+    if (!result) {
+      return reply.code(404).send({
+        error: "Conversation not found."
+      });
+    }
+
+    return reply.send(result);
   });
 };

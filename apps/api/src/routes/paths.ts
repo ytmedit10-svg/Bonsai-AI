@@ -4,11 +4,16 @@ import { z } from "zod";
 import {
   createAssistantMessage,
   createPathMessage,
-  getRecentPathMessagesForGeneration,
-  listPathMessages
+  listPathMessages,
+  MessageEditRegenerationError,
+  selectPathAssistantMessageVariant,
+  updatePathAssistantMessage,
+  updateLatestUserMessageForRegeneration,
+  updatePathUserMessage
 } from "../services/message-service.js";
-import { ensureBootstrapUser } from "../services/bootstrap-user-service.js";
+import { ensureRequestUser } from "../services/bootstrap-user-service.js";
 import {
+  AiProviderCapabilityError,
   getActiveInferenceProfile,
   MissingAiProviderApiKeyError,
   generatePathReply,
@@ -19,15 +24,65 @@ import {
   failModelRun,
   startModelRun
 } from "../services/model-run-service.js";
+import { attachUploadedAttachmentsToMessage } from "../services/attachment-service.js";
+import {
+  buildContextBundle,
+  summarizeContextBundle
+} from "../services/context-budget-service.js";
+import { buildApiError, type ApiErrorPayload } from "../services/api-error.js";
+import { enqueueSingletonJob } from "../services/job-service.js";
 import { maybeGenerateConversationTitle } from "../services/conversation-title-service.js";
 import { createBranchFromMessage } from "../services/path-service.js";
+import {
+  buildAssistantContentSources,
+  buildAssistantContentSourcesWithWeb
+} from "../services/source-reference-service.js";
 
 const pathParamsSchema = z.object({
   pathId: z.string().uuid()
 });
 
+const messagePathParamsSchema = pathParamsSchema.extend({
+  messageId: z.string().uuid()
+});
+
+const messageAttachmentSchema = z.object({
+  dataUrl: z
+    .string()
+    .startsWith("data:image/")
+    .max(7_000_000)
+    .optional(),
+  id: z.string().trim().min(1).max(120),
+  kind: z.enum(["file", "image"]),
+  mimeType: z.string().trim().min(1).max(120),
+  name: z.string().trim().min(1).max(240),
+  size: z.number().int().min(0).max(8_000_000),
+  sourceUrl: z.string().trim().min(1).max(500).optional(),
+  thumbnailUrl: z.string().trim().min(1).max(500).optional(),
+  source: z.enum(["clipboard", "file"]).optional()
+});
+
 const createMessageSchema = z.object({
-  content: z.string().trim().min(1).max(8000)
+  attachments: z.array(messageAttachmentSchema).max(12).optional().default([]),
+  content: z.string().trim().min(1).max(60000),
+  modelName: z.string().trim().min(1).max(120).optional(),
+  thinkingEnabled: z.boolean().optional().default(false),
+  webSearchEnabled: z.boolean().optional().default(false)
+});
+
+const updateMessageSchema = createMessageSchema;
+
+const regenerateMessageSchema = z.object({
+  modelName: z.string().trim().min(1).max(120).optional(),
+  thinkingEnabled: z.boolean().optional().default(false)
+});
+
+const editAndRegenerateMessageSchema = regenerateMessageSchema.extend({
+  content: z.string().trim().min(1).max(60000)
+});
+
+const selectVariantSchema = z.object({
+  variantNo: z.number().int().positive()
 });
 
 const createBranchSchema = z.object({
@@ -106,11 +161,108 @@ const getProviderError = (error: unknown) => {
   return null;
 };
 
+const toErrorText = (error: unknown, fallback: string) =>
+  error instanceof Error ? error.message : fallback;
+
+const getChatApiError = (error: unknown, fallback: string): ApiErrorPayload => {
+  if (error instanceof MissingAiProviderApiKeyError) {
+    return buildApiError({
+      code: "AI_PROVIDER_MISSING_KEY",
+      message: error.message,
+      retryable: false,
+      type: "provider"
+    });
+  }
+
+  if (error instanceof AiProviderCapabilityError) {
+    return buildApiError({
+      code: "AI_PROVIDER_CAPABILITY_UNSUPPORTED",
+      message: error.message,
+      retryable: false,
+      type: "validation"
+    });
+  }
+
+  const providerError = getProviderError(error);
+
+  if (providerError) {
+    return buildApiError({
+      code: `AI_PROVIDER_${providerError.statusCode}`,
+      message: providerError.message,
+      retryable: providerError.statusCode === 429 || providerError.statusCode >= 500,
+      type: "provider"
+    });
+  }
+
+  return buildApiError({
+    code: "CHAT_GENERATION_FAILED",
+    message: fallback,
+    retryable: true,
+    type: "app"
+  });
+};
+
+const getErrorStatusCode = (error: unknown) => {
+  if (error instanceof MissingAiProviderApiKeyError) {
+    return 503;
+  }
+
+  if (error instanceof AiProviderCapabilityError) {
+    return 400;
+  }
+
+  return getProviderError(error)?.statusCode ?? 500;
+};
+
+const compactPathAfterAssistantResponse = (
+  request: FastifyRequest,
+  modelName: string | null,
+  thinkingEnabled: boolean,
+  pathId: string,
+  userId: string
+) => {
+  void enqueueSingletonJob({
+    dedupeKey: `path_compaction:${pathId}`,
+    jobType: "path_compaction",
+    maxAttempts: 3,
+    payloadJson: {
+      pathId,
+      modelName,
+      reason: "after_assistant_response",
+      thinkingEnabled,
+      userId
+    }
+  }).catch((error) => request.log.error(error));
+};
+
+const markMessageAttachmentsAttached = async ({
+  attachmentIds,
+  messageId,
+  pathId,
+  userId
+}: {
+  attachmentIds: string[];
+  messageId: string;
+  pathId: string;
+  userId: string;
+}) => {
+  if (attachmentIds.length === 0) {
+    return;
+  }
+
+  await attachUploadedAttachmentsToMessage({
+    attachmentIds,
+    messageId,
+    pathId,
+    userId
+  });
+};
+
 export const registerPathRoutes = (server: FastifyInstance) => {
   server.post("/paths/:pathId/branch", async (request, reply) => {
     const params = pathParamsSchema.parse(request.params);
     const body = createBranchSchema.parse(request.body);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const result = await createBranchFromMessage({
       pathType: body.pathType,
@@ -141,7 +293,7 @@ export const registerPathRoutes = (server: FastifyInstance) => {
 
   server.get("/paths/:pathId/messages", async (request, reply) => {
     const params = pathParamsSchema.parse(request.params);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const result = await listPathMessages(params.pathId, user.id);
 
@@ -154,13 +306,78 @@ export const registerPathRoutes = (server: FastifyInstance) => {
     return reply.send(result);
   });
 
+  server.post("/paths/:pathId/compact", async (request, reply) => {
+    const params = pathParamsSchema.parse(request.params);
+    const user = await ensureRequestUser(request);
+    const contextBundle = await buildContextBundle({
+      pathId: params.pathId,
+      purpose: "chat_response",
+      userId: user.id
+    });
+
+    if (!contextBundle) {
+      return reply.code(404).send({
+        error: "Path not found."
+      });
+    }
+
+    const job = await enqueueSingletonJob({
+      dedupeKey: `path_compaction:${params.pathId}:manual`,
+      jobType: "path_compaction",
+      maxAttempts: 3,
+      payloadJson: {
+        pathId: params.pathId,
+        reason: "manual",
+        userId: user.id
+      }
+    });
+
+    return reply.code(job.status === "queued" ? 202 : 200).send({
+      job,
+      status: "queued"
+    });
+  });
+
+  server.get("/paths/:pathId/context", async (request, reply) => {
+    const params = pathParamsSchema.parse(request.params);
+    const user = await ensureRequestUser(request);
+    const contextBundle = await buildContextBundle({
+      pathId: params.pathId,
+      purpose: "chat_response",
+      userId: user.id
+    });
+
+    if (!contextBundle) {
+      return reply.code(404).send({
+        error: "Path not found."
+      });
+    }
+
+    return reply.send({
+      context: summarizeContextBundle(contextBundle),
+      memories: {
+        compaction: contextBundle.activeCompaction,
+        mergeMemories: contextBundle.mergeMemories,
+        snapshot: contextBundle.branchSnapshot
+      },
+      recentMessages: contextBundle.recentMessages,
+      retrievalCandidates: contextBundle.retrievalCandidates
+    });
+  });
+
   server.post("/paths/:pathId/messages", async (request, reply) => {
     const params = pathParamsSchema.parse(request.params);
     const body = createMessageSchema.parse(request.body);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const result = await createPathMessage({
       content: body.content,
+      contentJson:
+        body.attachments.length > 0
+          ? {
+              attachments: body.attachments
+            }
+          : null,
       createdBy: "user",
       pathId: params.pathId,
       userId: user.id
@@ -172,15 +389,23 @@ export const registerPathRoutes = (server: FastifyInstance) => {
       });
     }
 
+    await markMessageAttachmentsAttached({
+      attachmentIds: body.attachments.map((attachment) => attachment.id),
+      messageId: result.message.id,
+      pathId: params.pathId,
+      userId: user.id
+    });
+
     let runId: string | null = null;
 
     try {
-      const generationContext = await getRecentPathMessagesForGeneration(
-        params.pathId,
-        user.id
-      );
+      const contextBundle = await buildContextBundle({
+        pathId: params.pathId,
+        purpose: "chat_response",
+        userId: user.id
+      });
 
-      if (!generationContext) {
+      if (!contextBundle) {
         return reply.code(404).send({
           error: "Path not found."
         });
@@ -193,22 +418,33 @@ export const registerPathRoutes = (server: FastifyInstance) => {
         messageId: result.message.id,
         modelName: inferenceProfile.chatModel,
         modelProvider: inferenceProfile.provider,
-        pathId: result.path.pathId,
+        pathId: contextBundle.path.pathId,
         requestPayloadJson: {
-          inheritedSnapshot: Boolean(generationContext.snapshot?.snapshotText),
-          recentMessages: generationContext.messages.length
+          attachmentCount: body.attachments.length,
+          contextBundle: summarizeContextBundle(contextBundle),
+          selectedModelName: body.modelName ?? null,
+          thinkingEnabled: body.thinkingEnabled,
+          webSearchEnabled: body.webSearchEnabled
         },
         runType: "chat_response"
       });
       runId = run.id;
 
       const generated = await generatePathReply({
-        history: generationContext.messages,
-        inheritedSnapshotText: generationContext.snapshot?.snapshotText ?? null
+        history: contextBundle.recentMessages,
+        inheritedSnapshotText: contextBundle.branchSnapshot?.snapshotText ?? null,
+        memoryContextText: contextBundle.memoryContextText,
+        modelName: body.modelName ?? null,
+        thinkingEnabled: body.thinkingEnabled,
+        webSearchEnabled: body.webSearchEnabled
       });
 
       const assistantResult = await createAssistantMessage({
         content: generated.text,
+        contentJson: buildAssistantContentSourcesWithWeb({
+          bundle: contextBundle,
+          groundingMetadata: generated.groundingMetadata ?? null
+        }),
         modelName: generated.modelName,
         modelProvider: generated.modelProvider,
         pathId: params.pathId,
@@ -229,6 +465,7 @@ export const registerPathRoutes = (server: FastifyInstance) => {
         modelProvider: generated.modelProvider,
         outputTokens: generated.usage?.outputTokens ?? null,
         responsePayloadJson: {
+          groundingMetadata: generated.groundingMetadata ?? null,
           totalTokens: generated.usage?.totalTokens ?? null
         },
         runId
@@ -236,9 +473,18 @@ export const registerPathRoutes = (server: FastifyInstance) => {
 
       const conversationTitle = await maybeGenerateConversationTitle({
         conversationId: result.path.conversationId,
+        modelName: generated.modelName,
+        thinkingEnabled: body.thinkingEnabled,
         pathId: result.path.pathId,
         userId: user.id
       });
+      compactPathAfterAssistantResponse(
+        request,
+        generated.modelName,
+        body.thinkingEnabled,
+        params.pathId,
+        user.id
+      );
 
       return reply.code(201).send({
         assistantMessage: assistantResult?.message ?? null,
@@ -247,35 +493,24 @@ export const registerPathRoutes = (server: FastifyInstance) => {
         userMessage: result.message
       });
     } catch (error) {
+      const errorPayload = getChatApiError(error, "Failed to generate assistant response.");
+
       if (runId) {
         await failModelRun({
-          errorText: error instanceof Error ? error.message : "Chat generation failed.",
+          errorText: toErrorText(error, "Chat generation failed."),
+          responsePayloadJson: {
+            error: errorPayload.error
+          },
           runId
         });
       }
 
-      if (error instanceof MissingAiProviderApiKeyError) {
-        return reply.code(503).send({
-          error: error.message,
-          path: result.path,
-          userMessage: result.message
-        });
+      if (errorPayload.error.type === "app") {
+        request.log.error(error);
       }
 
-      const providerError = getProviderError(error);
-
-      if (providerError) {
-        return reply.code(providerError.statusCode).send({
-          error: providerError.message,
-          path: result.path,
-          userMessage: result.message
-        });
-      }
-
-      request.log.error(error);
-
-      return reply.code(500).send({
-        error: "Failed to generate assistant response.",
+      return reply.code(getErrorStatusCode(error)).send({
+        ...errorPayload,
         path: result.path,
         userMessage: result.message
       });
@@ -285,10 +520,16 @@ export const registerPathRoutes = (server: FastifyInstance) => {
   server.post("/paths/:pathId/messages/stream", async (request, reply) => {
     const params = pathParamsSchema.parse(request.params);
     const body = createMessageSchema.parse(request.body);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const result = await createPathMessage({
       content: body.content,
+      contentJson:
+        body.attachments.length > 0
+          ? {
+              attachments: body.attachments
+            }
+          : null,
       createdBy: "user",
       pathId: params.pathId,
       userId: user.id
@@ -300,20 +541,36 @@ export const registerPathRoutes = (server: FastifyInstance) => {
       });
     }
 
+    await markMessageAttachmentsAttached({
+      attachmentIds: body.attachments.map((attachment) => attachment.id),
+      messageId: result.message.id,
+      pathId: params.pathId,
+      userId: user.id
+    });
+
     let runId: string | null = null;
+    let fullText = "";
+    let streamedModelName: string | null = null;
+    let streamedModelProvider: string | null = null;
+    let streamOpened = false;
+    let groundingMetadata: unknown = null;
+    let assistantContentSources: Record<string, unknown> = {
+      sources: []
+    };
 
     try {
-      const generationContext = await getRecentPathMessagesForGeneration(
-        params.pathId,
-        user.id
-      );
+      const contextBundle = await buildContextBundle({
+        pathId: params.pathId,
+        purpose: "chat_response",
+        userId: user.id
+      });
 
-      if (!generationContext) {
+      if (!contextBundle) {
         return reply.code(404).send({
           error: "Path not found."
         });
       }
-
+      assistantContentSources = buildAssistantContentSources(contextBundle);
       const inferenceProfile = getActiveInferenceProfile();
       const run = await startModelRun({
         cacheMode: "implicit",
@@ -321,32 +578,41 @@ export const registerPathRoutes = (server: FastifyInstance) => {
         messageId: result.message.id,
         modelName: inferenceProfile.chatModel,
         modelProvider: inferenceProfile.provider,
-        pathId: result.path.pathId,
+        pathId: contextBundle.path.pathId,
         requestPayloadJson: {
-          inheritedSnapshot: Boolean(generationContext.snapshot?.snapshotText),
-          recentMessages: generationContext.messages.length,
-          streaming: true
+          attachmentCount: body.attachments.length,
+          contextBundle: summarizeContextBundle(contextBundle),
+          selectedModelName: body.modelName ?? null,
+          thinkingEnabled: body.thinkingEnabled,
+          streaming: true,
+          webSearchEnabled: body.webSearchEnabled
         },
         runType: "chat_response"
       });
       runId = run.id;
 
       const streamed = await streamPathReply({
-        history: generationContext.messages,
-        inheritedSnapshotText: generationContext.snapshot?.snapshotText ?? null
+        history: contextBundle.recentMessages,
+        inheritedSnapshotText: contextBundle.branchSnapshot?.snapshotText ?? null,
+        memoryContextText: contextBundle.memoryContextText,
+        modelName: body.modelName ?? null,
+        thinkingEnabled: body.thinkingEnabled,
+        webSearchEnabled: body.webSearchEnabled
       });
+      streamedModelName = streamed.modelName;
+      streamedModelProvider = streamed.modelProvider;
 
       reply.hijack();
       reply.raw.writeHead(200, createSseHeaders(request));
+      streamOpened = true;
 
       writeSseEvent(reply.raw, "run.started", {
         modelName: streamed.modelName,
         modelProvider: streamed.modelProvider,
+        runId,
         pathId: result.path.pathId,
         userMessageId: result.message.id
       });
-
-      let fullText = "";
 
       for await (const chunk of streamed.stream) {
         const text = chunk.text ?? "";
@@ -364,6 +630,10 @@ export const registerPathRoutes = (server: FastifyInstance) => {
 
       const assistantResult = await createAssistantMessage({
         content: fullText.trim(),
+        contentJson: buildAssistantContentSourcesWithWeb({
+          bundle: contextBundle,
+          groundingMetadata: streamed.groundingMetadata.current
+        }),
         modelName: streamed.modelName,
         modelProvider: streamed.modelProvider,
         pathId: params.pathId,
@@ -384,6 +654,7 @@ export const registerPathRoutes = (server: FastifyInstance) => {
         modelProvider: streamed.modelProvider,
         outputTokens: streamed.usage?.outputTokens ?? null,
         responsePayloadJson: {
+          groundingMetadata: streamed.groundingMetadata.current,
           totalTokens: streamed.usage?.totalTokens ?? null
         },
         runId
@@ -391,9 +662,18 @@ export const registerPathRoutes = (server: FastifyInstance) => {
 
       const conversationTitle = await maybeGenerateConversationTitle({
         conversationId: result.path.conversationId,
+        modelName: streamed.modelName,
+        thinkingEnabled: body.thinkingEnabled,
         pathId: result.path.pathId,
         userId: user.id
       });
+      compactPathAfterAssistantResponse(
+        request,
+        streamed.modelName,
+        body.thinkingEnabled,
+        params.pathId,
+        user.id
+      );
 
       writeSseEvent(reply.raw, "message.completed", {
         assistantMessage: assistantResult?.message ?? null,
@@ -409,50 +689,555 @@ export const registerPathRoutes = (server: FastifyInstance) => {
       reply.raw.end();
       return;
     } catch (error) {
+      const errorPayload = getChatApiError(error, "Failed to stream assistant response.");
+      const responsePayloadJson = {
+        error: errorPayload.error,
+        partialTextLength: fullText.length
+      };
+      const failedAssistantResult = await createAssistantMessage({
+        content:
+          fullText.trim() ||
+          "Assistant response failed before any text was returned.",
+        contentJson: {
+          ...assistantContentSources,
+          resilience: {
+            error: errorPayload.error,
+            modelRunId: runId,
+            partial: fullText.trim().length > 0,
+            retryFromUserMessageId: result.message.id
+          }
+        },
+        modelName: streamedModelName ?? getActiveInferenceProfile().chatModel,
+        modelProvider: streamedModelProvider ?? getActiveInferenceProfile().provider,
+        pathId: params.pathId,
+        status: "failed",
+        userId: user.id
+      });
+
       if (runId) {
         await failModelRun({
-          errorText: error instanceof Error ? error.message : "Streaming failed.",
+          errorText: toErrorText(error, "Streaming failed."),
+          responsePayloadJson: {
+            ...responsePayloadJson,
+            failedAssistantMessageId: failedAssistantResult?.message.id ?? null
+          },
           runId
         });
       }
 
-      if (error instanceof MissingAiProviderApiKeyError) {
-        reply.hijack();
-        reply.raw.writeHead(503, createSseHeaders(request));
-        writeSseEvent(reply.raw, "run.error", {
-          error: error.message,
-          path: result.path,
-          userMessage: result.message
-        });
-        reply.raw.end();
-        return;
+      if (errorPayload.error.type === "app") {
+        request.log.error(error);
       }
 
-      const providerError = getProviderError(error);
-
-      if (providerError) {
+      if (!streamOpened) {
         reply.hijack();
-        reply.raw.writeHead(providerError.statusCode, createSseHeaders(request));
-        writeSseEvent(reply.raw, "run.error", {
-          error: providerError.message,
-          path: result.path,
-          userMessage: result.message
-        });
-        reply.raw.end();
-        return;
+        reply.raw.writeHead(getErrorStatusCode(error), createSseHeaders(request));
+        streamOpened = true;
       }
 
-      request.log.error(error);
-
-      reply.hijack();
-      reply.raw.writeHead(500, createSseHeaders(request));
       writeSseEvent(reply.raw, "run.error", {
-        error: "Failed to stream assistant response.",
+        assistantMessage: failedAssistantResult?.message ?? null,
+        error: errorPayload.error,
+        message: errorPayload.message,
         path: result.path,
+        runId,
         userMessage: result.message
       });
       reply.raw.end();
       return;
     }
+  });
+
+  server.patch("/paths/:pathId/messages/:messageId", async (request, reply) => {
+    const params = messagePathParamsSchema.parse(request.params);
+    const body = updateMessageSchema.parse(request.body);
+    const user = await ensureRequestUser(request);
+
+    const result = await updatePathUserMessage({
+      content: body.content,
+      messageId: params.messageId,
+      pathId: params.pathId,
+      userId: user.id
+    });
+
+    if (!result) {
+      return reply.code(404).send({
+        error: "User message not found."
+      });
+    }
+
+    return reply.send(result);
+  });
+
+  server.post(
+    "/paths/:pathId/messages/:messageId/edit/regenerate/stream",
+    async (request, reply) => {
+      const params = messagePathParamsSchema.parse(request.params);
+      const body = editAndRegenerateMessageSchema.parse(request.body ?? {});
+      const user = await ensureRequestUser(request);
+      let editResult: Awaited<ReturnType<typeof updateLatestUserMessageForRegeneration>>;
+
+      try {
+        editResult = await updateLatestUserMessageForRegeneration({
+          content: body.content,
+          messageId: params.messageId,
+          pathId: params.pathId,
+          userId: user.id
+        });
+      } catch (error) {
+        if (error instanceof MessageEditRegenerationError) {
+          return reply.code(error.statusCode).send({
+            error: error.message
+          });
+        }
+
+        throw error;
+      }
+
+      if (!editResult) {
+        return reply.code(404).send({
+          error: "User message not found."
+        });
+      }
+
+      const contextBundle = await buildContextBundle({
+        beforeAssistantMessageId: editResult.assistantMessage.id,
+        pathId: params.pathId,
+        purpose: "regenerate",
+        userId: user.id
+      });
+
+      if (!contextBundle || !contextBundle.sourceUserMessage) {
+        return reply.code(404).send({
+          error: "Assistant response not found."
+        });
+      }
+
+      let runId: string | null = null;
+      let fullText = "";
+      let streamedModelName: string | null = null;
+      let streamedModelProvider: string | null = null;
+      let streamOpened = false;
+      let groundingMetadata: unknown = null;
+
+      try {
+        const inferenceProfile = getActiveInferenceProfile();
+        const contextBundleSummary = summarizeContextBundle(contextBundle);
+        const run = await startModelRun({
+          cacheMode: "implicit",
+          conversationId: contextBundle.path.conversationId,
+          messageId: contextBundle.sourceUserMessage.id,
+          modelName: inferenceProfile.chatModel,
+          modelProvider: inferenceProfile.provider,
+          pathId: contextBundle.path.pathId,
+          requestPayloadJson: {
+            contextBundle: contextBundleSummary,
+            editedUserMessageId: editResult.userMessage.id,
+            regeneratedFromMessageId: editResult.assistantMessage.id,
+            selectedModelName: body.modelName ?? null,
+            thinkingEnabled: body.thinkingEnabled,
+            streaming: true
+          },
+          runType: "chat_response"
+        });
+        runId = run.id;
+
+        const streamed = await streamPathReply({
+          history: contextBundle.recentMessages,
+          inheritedSnapshotText: contextBundle.branchSnapshot?.snapshotText ?? null,
+          memoryContextText: contextBundle.memoryContextText,
+          modelName: body.modelName ?? null,
+          thinkingEnabled: body.thinkingEnabled
+        });
+        streamedModelName = streamed.modelName;
+        streamedModelProvider = streamed.modelProvider;
+
+        reply.hijack();
+        reply.raw.writeHead(200, createSseHeaders(request));
+        streamOpened = true;
+
+        writeSseEvent(reply.raw, "run.started", {
+          modelName: streamed.modelName,
+          modelProvider: streamed.modelProvider,
+          runId,
+          pathId: contextBundle.path.pathId,
+          userMessageId: contextBundle.sourceUserMessage.id
+        });
+
+        for await (const chunk of streamed.stream) {
+          const text = chunk.text ?? "";
+
+          if (!text) {
+            continue;
+          }
+
+          fullText += text;
+
+          writeSseEvent(reply.raw, "message.delta", {
+            text
+          });
+        }
+        groundingMetadata = streamed.groundingMetadata.current;
+
+        const assistantResult = await updatePathAssistantMessage({
+          content: fullText.trim(),
+          contentJsonPatch: buildAssistantContentSourcesWithWeb({
+            bundle: contextBundle,
+            groundingMetadata
+          }),
+          lineage: {
+            contextBundle: contextBundleSummary,
+            modelRunId: run.id,
+            sourceUserMessageId: contextBundle.sourceUserMessage.id
+          },
+          messageId: editResult.assistantMessage.id,
+          modelName: streamed.modelName,
+          modelProvider: streamed.modelProvider,
+          pathId: params.pathId,
+          userId: user.id
+        });
+
+        await completeModelRun({
+          cacheMode:
+            streamed.cacheMode === "explicit"
+              ? "explicit"
+              : streamed.cacheMode === "none"
+                ? "none"
+                : "implicit",
+          cacheRecordId: streamed.cacheRecordId ?? null,
+          cachedTokens: streamed.usage?.cachedTokens ?? null,
+          inputTokens: streamed.usage?.inputTokens ?? null,
+          modelName: streamed.modelName,
+          modelProvider: streamed.modelProvider,
+          outputTokens: streamed.usage?.outputTokens ?? null,
+          responsePayloadJson: {
+            editedUserMessageId: editResult.userMessage.id,
+            regeneratedFromMessageId: editResult.assistantMessage.id,
+            totalTokens: streamed.usage?.totalTokens ?? null
+          },
+          runId
+        });
+        compactPathAfterAssistantResponse(
+          request,
+          streamed.modelName,
+          body.thinkingEnabled,
+          params.pathId,
+          user.id
+        );
+
+        writeSseEvent(reply.raw, "message.completed", {
+          assistantMessage: assistantResult?.message ?? null,
+          conversationTitle: null,
+          path: contextBundle.path,
+          userMessage: contextBundle.sourceUserMessage
+        });
+
+        writeSseEvent(reply.raw, "run.completed", {
+          ok: true
+        });
+
+        reply.raw.end();
+        return;
+      } catch (error) {
+        const errorPayload = getChatApiError(
+          error,
+          "Failed to regenerate edited assistant response."
+        );
+        const failedAssistantResult = await updatePathAssistantMessage({
+          content:
+            fullText.trim() ||
+            "Assistant response failed before any text was returned.",
+          contentJsonPatch: {
+            ...buildAssistantContentSourcesWithWeb({
+              bundle: contextBundle,
+              groundingMetadata
+            }),
+            resilience: {
+              error: errorPayload.error,
+              modelRunId: runId,
+              partial: fullText.trim().length > 0,
+              retryFromUserMessageId: contextBundle.sourceUserMessage.id
+            }
+          },
+          lineage: runId
+            ? {
+                contextBundle: summarizeContextBundle(contextBundle),
+                modelRunId: runId,
+                sourceUserMessageId: contextBundle.sourceUserMessage.id
+              }
+            : undefined,
+          messageId: editResult.assistantMessage.id,
+          modelName: streamedModelName ?? getActiveInferenceProfile().chatModel,
+          modelProvider: streamedModelProvider ?? getActiveInferenceProfile().provider,
+          pathId: params.pathId,
+          status: "failed",
+          userId: user.id
+        });
+
+        if (runId) {
+          await failModelRun({
+            errorText: toErrorText(error, "Streaming failed."),
+            responsePayloadJson: {
+              error: errorPayload.error,
+              editedUserMessageId: editResult.userMessage.id,
+              failedAssistantMessageId: failedAssistantResult?.message.id ?? null,
+              partialTextLength: fullText.length,
+              regeneratedFromMessageId: editResult.assistantMessage.id
+            },
+            runId
+          });
+        }
+
+        if (errorPayload.error.type === "app") {
+          request.log.error(error);
+        }
+
+        if (!streamOpened) {
+          reply.hijack();
+          reply.raw.writeHead(getErrorStatusCode(error), createSseHeaders(request));
+          streamOpened = true;
+        }
+
+        writeSseEvent(reply.raw, "run.error", {
+          assistantMessage: failedAssistantResult?.message ?? null,
+          error: errorPayload.error,
+          message: errorPayload.message,
+          path: contextBundle.path,
+          runId,
+          userMessage: contextBundle.sourceUserMessage
+        });
+        reply.raw.end();
+        return;
+      }
+    }
+  );
+
+  server.post("/paths/:pathId/messages/:messageId/regenerate/stream", async (request, reply) => {
+    const params = messagePathParamsSchema.parse(request.params);
+    const body = regenerateMessageSchema.parse(request.body ?? {});
+    const user = await ensureRequestUser(request);
+    const contextBundle = await buildContextBundle({
+      beforeAssistantMessageId: params.messageId,
+      pathId: params.pathId,
+      purpose: "regenerate",
+      userId: user.id
+    });
+
+    if (!contextBundle || !contextBundle.sourceUserMessage) {
+      return reply.code(404).send({
+        error: "Assistant message not found."
+      });
+    }
+
+    let runId: string | null = null;
+    let fullText = "";
+    let streamedModelName: string | null = null;
+    let streamedModelProvider: string | null = null;
+    let streamOpened = false;
+    let groundingMetadata: unknown = null;
+
+    try {
+      const inferenceProfile = getActiveInferenceProfile();
+      const run = await startModelRun({
+        cacheMode: "implicit",
+        conversationId: contextBundle.path.conversationId,
+        messageId: contextBundle.sourceUserMessage.id,
+        modelName: inferenceProfile.chatModel,
+        modelProvider: inferenceProfile.provider,
+        pathId: contextBundle.path.pathId,
+        requestPayloadJson: {
+          contextBundle: summarizeContextBundle(contextBundle),
+          regeneratedFromMessageId: params.messageId,
+          selectedModelName: body.modelName ?? null,
+          thinkingEnabled: body.thinkingEnabled,
+          streaming: true
+        },
+        runType: "chat_response"
+      });
+      runId = run.id;
+      const contextBundleSummary = summarizeContextBundle(contextBundle);
+
+      const streamed = await streamPathReply({
+        history: contextBundle.recentMessages,
+        inheritedSnapshotText: contextBundle.branchSnapshot?.snapshotText ?? null,
+        memoryContextText: contextBundle.memoryContextText,
+        modelName: body.modelName ?? null,
+        thinkingEnabled: body.thinkingEnabled
+      });
+      streamedModelName = streamed.modelName;
+      streamedModelProvider = streamed.modelProvider;
+
+      reply.hijack();
+      reply.raw.writeHead(200, createSseHeaders(request));
+      streamOpened = true;
+
+      writeSseEvent(reply.raw, "run.started", {
+        modelName: streamed.modelName,
+        modelProvider: streamed.modelProvider,
+        runId,
+        pathId: contextBundle.path.pathId,
+        userMessageId: contextBundle.sourceUserMessage.id
+      });
+
+      for await (const chunk of streamed.stream) {
+        const text = chunk.text ?? "";
+
+        if (!text) {
+          continue;
+        }
+
+        fullText += text;
+
+        writeSseEvent(reply.raw, "message.delta", {
+          text
+        });
+      }
+      groundingMetadata = streamed.groundingMetadata.current;
+
+      const assistantResult = await updatePathAssistantMessage({
+        content: fullText.trim(),
+        contentJsonPatch: buildAssistantContentSourcesWithWeb({
+          bundle: contextBundle,
+          groundingMetadata
+        }),
+        lineage: {
+          contextBundle: contextBundleSummary,
+          modelRunId: run.id,
+          sourceUserMessageId: contextBundle.sourceUserMessage.id
+        },
+        messageId: params.messageId,
+        modelName: streamed.modelName,
+        modelProvider: streamed.modelProvider,
+        pathId: params.pathId,
+        userId: user.id
+      });
+
+      await completeModelRun({
+        cacheMode:
+          streamed.cacheMode === "explicit"
+            ? "explicit"
+            : streamed.cacheMode === "none"
+              ? "none"
+              : "implicit",
+        cacheRecordId: streamed.cacheRecordId ?? null,
+        cachedTokens: streamed.usage?.cachedTokens ?? null,
+        inputTokens: streamed.usage?.inputTokens ?? null,
+        modelName: streamed.modelName,
+        modelProvider: streamed.modelProvider,
+        outputTokens: streamed.usage?.outputTokens ?? null,
+        responsePayloadJson: {
+          regeneratedFromMessageId: params.messageId,
+          totalTokens: streamed.usage?.totalTokens ?? null
+        },
+        runId
+      });
+      compactPathAfterAssistantResponse(
+        request,
+        streamed.modelName,
+        body.thinkingEnabled,
+        params.pathId,
+        user.id
+      );
+
+      writeSseEvent(reply.raw, "message.completed", {
+        assistantMessage: assistantResult?.message ?? null,
+        conversationTitle: null,
+        path: contextBundle.path,
+        userMessage: contextBundle.sourceUserMessage
+      });
+
+      writeSseEvent(reply.raw, "run.completed", {
+        ok: true
+      });
+
+      reply.raw.end();
+      return;
+    } catch (error) {
+      const errorPayload = getChatApiError(error, "Failed to regenerate assistant response.");
+      const failedAssistantResult = fullText.trim()
+        ? await updatePathAssistantMessage({
+            content: fullText.trim(),
+            contentJsonPatch: {
+              ...buildAssistantContentSourcesWithWeb({
+                bundle: contextBundle,
+                groundingMetadata
+              }),
+              resilience: {
+                error: errorPayload.error,
+                modelRunId: runId,
+                partial: true,
+                retryFromUserMessageId: contextBundle.sourceUserMessage.id
+              }
+            },
+            lineage: runId
+              ? {
+                  contextBundle: summarizeContextBundle(contextBundle),
+                  modelRunId: runId,
+                  sourceUserMessageId: contextBundle.sourceUserMessage.id
+                }
+              : undefined,
+            messageId: params.messageId,
+            modelName: streamedModelName ?? getActiveInferenceProfile().chatModel,
+            modelProvider: streamedModelProvider ?? getActiveInferenceProfile().provider,
+            pathId: params.pathId,
+            status: "failed",
+            userId: user.id
+          })
+        : null;
+
+      if (runId) {
+        await failModelRun({
+          errorText: toErrorText(error, "Streaming failed."),
+          responsePayloadJson: {
+            error: errorPayload.error,
+            failedAssistantMessageId: failedAssistantResult?.message.id ?? null,
+            partialTextLength: fullText.length,
+            regeneratedFromMessageId: params.messageId
+          },
+          runId
+        });
+      }
+
+      if (errorPayload.error.type === "app") {
+        request.log.error(error);
+      }
+
+      if (!streamOpened) {
+        reply.hijack();
+        reply.raw.writeHead(getErrorStatusCode(error), createSseHeaders(request));
+        streamOpened = true;
+      }
+
+      writeSseEvent(reply.raw, "run.error", {
+        assistantMessage: failedAssistantResult?.message ?? null,
+        error: errorPayload.error,
+        message: errorPayload.message,
+        path: contextBundle.path,
+        runId,
+        userMessage: contextBundle.sourceUserMessage
+      });
+      reply.raw.end();
+      return;
+    }
+  });
+
+  server.patch("/paths/:pathId/messages/:messageId/variant", async (request, reply) => {
+    const params = messagePathParamsSchema.parse(request.params);
+    const body = selectVariantSchema.parse(request.body);
+    const user = await ensureRequestUser(request);
+    const result = await selectPathAssistantMessageVariant({
+      messageId: params.messageId,
+      pathId: params.pathId,
+      userId: user.id,
+      variantNo: body.variantNo
+    });
+
+    if (!result) {
+      return reply.code(404).send({
+        error: "Assistant variant not found."
+      });
+    }
+
+    return reply.send(result);
   });
 };

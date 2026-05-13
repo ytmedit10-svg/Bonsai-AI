@@ -7,18 +7,27 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n web,api -c blue,green \"npm run dev --workspace @node-based-chat/web\" \"npm run dev --workspace @node-based-chat/api\"",
+    "dev": "npm run dev:local",
+    "dev:local": "node scripts/local-preflight.mjs --env-example .env.local.example && npm run dev:app",
+    "dev:hosted": "node scripts/local-preflight.mjs --env-example .env.hosted.example --skip-ollama && npm run dev:app",
+    "dev:app": "concurrently -n web,api -c blue,green \"npm run dev --workspace @node-based-chat/web\" \"npm run dev --workspace @node-based-chat/api\"",
     "dev:web": "npm run dev --workspace @node-based-chat/web",
     "dev:api": "npm run dev --workspace @node-based-chat/api",
+    "dev:worker": "npm run dev:worker --workspace @node-based-chat/api",
+    "worker": "npm run worker --workspace @node-based-chat/api",
+    "setup:postgres:windows": "powershell -ExecutionPolicy Bypass -File scripts/setup-local-postgres-windows.ps1",
     "db:generate": "drizzle-kit generate --config drizzle.config.ts",
     "db:migrate": "drizzle-kit migrate --config drizzle.config.ts",
     "build": "npm run build --workspaces --if-present",
+    "eval:replay": "npm run eval:replay --workspace @node-based-chat/api",
+    "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "devDependencies": {
     "concurrently": "^9.0.1",
-    "drizzle-kit": "^0.31.7",
+    "drizzle-kit": "^0.31.10",
     "drizzle-orm": "^0.45.2",
+    "pg": "^8.20.0",
     "typescript": "^5.8.3"
   }
 }

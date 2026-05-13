@@ -1,0 +1,12 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" rx="112" fill="#F7F1EA"/>
+  <text
+    x="256"
+    y="286"
+    text-anchor="middle"
+    dominant-baseline="middle"
+    font-size="340"
+    font-family="serif"
+    font-weight="600"
+    fill="#8B5E4E">木</text>
+</svg>

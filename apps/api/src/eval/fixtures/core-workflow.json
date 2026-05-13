@@ -1,0 +1,12 @@
+{
+  "name": "core-workflow",
+  "conversationTitle": "Untitled Chat",
+  "mainPrompt": "Use the replay harness to explain why branch-aware context matters.",
+  "branchPrompt": "Continue from the replay branch and focus on verification.",
+  "branch": {
+    "focusText": "Replay branch point",
+    "pathType": "research",
+    "title": "Replay Verification Branch"
+  },
+  "mergeMode": "light"
+}

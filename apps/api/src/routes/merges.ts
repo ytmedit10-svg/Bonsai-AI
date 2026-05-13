@@ -1,13 +1,15 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
-import { ensureBootstrapUser } from "../services/bootstrap-user-service.js";
+import { ensureRequestUser } from "../services/bootstrap-user-service.js";
 import { MissingAiProviderApiKeyError } from "../services/ai-adapter.js";
 import { getMergeById, requestMerge } from "../services/merge-service.js";
 
 const createMergeSchema = z.object({
   acknowledgeOutdated: z.boolean().optional(),
   mergeMode: z.enum(["light", "full", "reference", "collapse"]).default("light"),
+  modelName: z.string().trim().min(1).max(120).optional(),
+  thinkingEnabled: z.boolean().optional().default(false),
   sourcePathId: z.string().uuid(),
   targetPathId: z.string().uuid().optional()
 });
@@ -63,12 +65,14 @@ const getProviderError = (error: unknown) => {
 export const registerMergeRoutes = (server: FastifyInstance) => {
   server.post("/merges", async (request, reply) => {
     const body = createMergeSchema.parse(request.body);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     try {
       const result = await requestMerge({
         acknowledgeOutdated: body.acknowledgeOutdated,
         mergeMode: body.mergeMode,
+        modelName: body.modelName ?? null,
+        thinkingEnabled: body.thinkingEnabled,
         sourcePathId: body.sourcePathId,
         targetPathId: body.targetPathId,
         userId: user.id
@@ -116,7 +120,7 @@ export const registerMergeRoutes = (server: FastifyInstance) => {
 
   server.get("/merges/:mergeId", async (request, reply) => {
     const params = mergeParamsSchema.parse(request.params);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const result = await getMergeById(params.mergeId, user.id);
 

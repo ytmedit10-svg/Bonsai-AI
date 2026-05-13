@@ -14,7 +14,7 @@ import {
   getConversationViewState,
   updateConversationViewState
 } from "../services/conversation-view-state-service.js";
-import { ensureBootstrapUser } from "../services/bootstrap-user-service.js";
+import { ensureRequestUser } from "../services/bootstrap-user-service.js";
 import { listConversationMerges } from "../services/merge-service.js";
 import { listConversationPaths } from "../services/path-service.js";
 
@@ -44,14 +44,14 @@ const updateConversationViewStateSchema = z.object({
 });
 
 export const registerConversationRoutes = (server: FastifyInstance) => {
-  server.get("/conversations", async () => {
-    const user = await ensureBootstrapUser();
+  server.get("/conversations", async (request) => {
+    const user = await ensureRequestUser(request);
     return listConversationsForUser(user.id);
   });
 
   server.post("/conversations", async (request, reply) => {
     const body = createConversationSchema.parse(request.body);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const result = await createConversationWithMainPath({
       title: body.title,
@@ -79,7 +79,7 @@ export const registerConversationRoutes = (server: FastifyInstance) => {
 
   server.get("/conversations/:conversationId", async (request, reply) => {
     const params = conversationParamsSchema.parse(request.params);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const summary = await getConversationSummary(params.conversationId, user.id);
 
@@ -95,7 +95,7 @@ export const registerConversationRoutes = (server: FastifyInstance) => {
   server.patch("/conversations/:conversationId", async (request, reply) => {
     const params = conversationParamsSchema.parse(request.params);
     const body = updateConversationSchema.parse(request.body);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const conversation = await updateConversation({
       conversationId: params.conversationId,
@@ -117,7 +117,7 @@ export const registerConversationRoutes = (server: FastifyInstance) => {
 
   server.delete("/conversations/:conversationId", async (request, reply) => {
     const params = conversationParamsSchema.parse(request.params);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const conversation = await deleteConversation(params.conversationId, user.id);
 
@@ -132,7 +132,7 @@ export const registerConversationRoutes = (server: FastifyInstance) => {
 
   server.post("/conversations/:conversationId/share", async (request, reply) => {
     const params = conversationParamsSchema.parse(request.params);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const result = await createOrGetConversationShare(params.conversationId, user.id);
 
@@ -155,7 +155,7 @@ export const registerConversationRoutes = (server: FastifyInstance) => {
 
   server.get("/conversations/:conversationId/paths", async (request, reply) => {
     const params = conversationParamsSchema.parse(request.params);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const result = await listConversationPaths(params.conversationId, user.id);
 
@@ -170,7 +170,7 @@ export const registerConversationRoutes = (server: FastifyInstance) => {
 
   server.get("/conversations/:conversationId/merges", async (request, reply) => {
     const params = conversationParamsSchema.parse(request.params);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const result = await listConversationMerges(params.conversationId, user.id);
 
@@ -185,7 +185,7 @@ export const registerConversationRoutes = (server: FastifyInstance) => {
 
   server.get("/conversations/:conversationId/view-state", async (request, reply) => {
     const params = conversationParamsSchema.parse(request.params);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const result = await getConversationViewState(params.conversationId, user.id);
 
@@ -201,7 +201,7 @@ export const registerConversationRoutes = (server: FastifyInstance) => {
   server.put("/conversations/:conversationId/view-state", async (request, reply) => {
     const params = conversationParamsSchema.parse(request.params);
     const body = updateConversationViewStateSchema.parse(request.body);
-    const user = await ensureBootstrapUser();
+    const user = await ensureRequestUser(request);
 
     const result = await updateConversationViewState({
       conversationId: params.conversationId,

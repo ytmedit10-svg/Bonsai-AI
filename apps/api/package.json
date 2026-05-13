@@ -5,10 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:worker": "tsx watch src/worker.ts",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "eval:replay": "tsx src/eval/replay.ts",
+    "test": "tsx src/services/message-lineage.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "worker": "node dist/worker.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1043.0",
     "@fastify/cors": "^10.0.1",
     "@google/genai": "^1.50.1",
     "@node-based-chat/shared": "0.1.0",

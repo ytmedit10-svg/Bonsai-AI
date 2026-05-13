@@ -8,6 +8,7 @@ import {
   pathSnapshots,
   type Message
 } from "../db/schema.js";
+import { enqueueEmbeddingForSource } from "./embedding-service.js";
 
 type CreateBranchInput = {
   splitBlockEndOffset: number;
@@ -48,8 +49,8 @@ const formatSnapshotText = ({
   ].join("\n");
 };
 
-const buildPartialSplitMessage = (
-  splitMessage: Message,
+export const buildPartialSplitMessage = (
+  splitMessage: Pick<Message, "contentText" | "role">,
   splitBlockEndOffset: number
 ) => ({
   ...splitMessage,
@@ -292,6 +293,11 @@ export const createBranchFromMessage = async ({
         updatedAt: new Date()
       })
       .where(eq(conversations.id, sourcePath.conversationId));
+
+    void enqueueEmbeddingForSource({
+      sourceId: snapshot.id,
+      sourceType: "path_snapshot"
+    }).catch(() => undefined);
 
     return {
       path: {
