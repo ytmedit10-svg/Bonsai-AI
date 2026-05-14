@@ -29,7 +29,12 @@ import {
   buildContextBundle,
   summarizeContextBundle
 } from "../services/context-budget-service.js";
-import { buildApiError, type ApiErrorPayload } from "../services/api-error.js";
+import {
+  buildApiError,
+  buildProviderApiError,
+  getProviderStatusCode,
+  type ApiErrorPayload
+} from "../services/api-error.js";
 import { enqueueSingletonJob } from "../services/job-service.js";
 import { maybeGenerateConversationTitle } from "../services/conversation-title-service.js";
 import { createBranchFromMessage } from "../services/path-service.js";
@@ -115,91 +120,51 @@ const createSseHeaders = (request: FastifyRequest) => ({
   "X-Accel-Buffering": "no"
 });
 
-const getProviderError = (error: unknown) => {
-  if (!error || typeof error !== "object") {
-    return null;
-  }
-
-  const maybeStatus = "status" in error ? error.status : null;
-  const maybeMessage = "message" in error ? error.message : null;
-
-  if (typeof maybeStatus === "number" && typeof maybeMessage === "string") {
-    let message = maybeMessage;
-
-    try {
-      const parsedOuter = JSON.parse(maybeMessage) as {
-        error?: {
-          message?: string;
-          code?: number;
-          status?: string;
-        };
-      };
-
-      if (parsedOuter.error?.message) {
-        try {
-          const parsedInner = JSON.parse(parsedOuter.error.message) as {
-            error?: {
-              message?: string;
-            };
-          };
-
-          message = parsedInner.error?.message ?? parsedOuter.error.message;
-        } catch {
-          message = parsedOuter.error.message;
-        }
-      }
-    } catch {
-      message = maybeMessage;
-    }
-
-    return {
-      message,
-      statusCode: maybeStatus
-    };
-  }
-
-  return null;
-};
-
 const toErrorText = (error: unknown, fallback: string) =>
   error instanceof Error ? error.message : fallback;
 
 const getChatApiError = (error: unknown, fallback: string): ApiErrorPayload => {
   if (error instanceof MissingAiProviderApiKeyError) {
     return buildApiError({
+      action: "Configure key",
       code: "AI_PROVIDER_MISSING_KEY",
-      message: error.message,
+      message: "Hosted AI is not configured for this deployment.",
+      reason: "provider_missing_key",
       retryable: false,
+      title: "Hosted AI is not configured",
       type: "provider"
     });
   }
 
   if (error instanceof AiProviderCapabilityError) {
     return buildApiError({
+      action: "Adjust request",
       code: "AI_PROVIDER_CAPABILITY_UNSUPPORTED",
-      message: error.message,
+      message: error.message.includes("Web search")
+        ? "Web search works only with hosted Gemini. It is hidden in local Ollama mode."
+        : "This model/provider does not support that request mode.",
+      reason: "capability_unsupported",
       retryable: false,
+      title: error.message.includes("Web search")
+        ? "Web search unavailable"
+        : "Request mode unavailable",
       type: "validation"
     });
   }
 
-  const providerError = getProviderError(error);
+  const providerError = buildProviderApiError(error, fallback);
 
-  if (providerError) {
-    return buildApiError({
-      code: `AI_PROVIDER_${providerError.statusCode}`,
-      message: providerError.message,
-      retryable: providerError.statusCode === 429 || providerError.statusCode >= 500,
-      type: "provider"
-    });
-  }
-
-  return buildApiError({
-    code: "CHAT_GENERATION_FAILED",
-    message: fallback,
-    retryable: true,
-    type: "app"
-  });
+  return providerError.error.code === "AI_PROVIDER_FAILED"
+    ? buildApiError({
+        action: "Retry",
+        code: "CHAT_GENERATION_FAILED",
+        message: fallback,
+        reason: "chat_generation_failed",
+        retryable: true,
+        title: "Bonsai hit an internal error",
+        type: "app"
+      })
+    : providerError;
 };
 
 const getErrorStatusCode = (error: unknown) => {
@@ -211,7 +176,7 @@ const getErrorStatusCode = (error: unknown) => {
     return 400;
   }
 
-  return getProviderError(error)?.statusCode ?? 500;
+  return getProviderStatusCode(error) ?? 500;
 };
 
 const compactPathAfterAssistantResponse = (

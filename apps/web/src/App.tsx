@@ -260,19 +260,27 @@ type StartedStreamPayload = {
 };
 
 type ApiErrorShape = {
+  action?: string;
   code?: string;
   message?: string;
+  providerStatus?: number;
+  reason?: string;
   retryable?: boolean;
+  title?: string;
   type?: string;
 };
 
 type ErrorSeverity = "error" | "warning";
 
 type UserFacingError = {
+  action?: string;
+  code?: string;
   details: unknown;
   id: string;
   message: string;
   persistent: boolean;
+  reason?: string;
+  retryable: boolean;
   severity: ErrorSeverity;
   title: string;
 };
@@ -1107,10 +1115,6 @@ const extractErrorMessage = async (response: Response) => {
       message?: string;
     };
 
-    if (payload.error && typeof payload.error === "object") {
-      return payload.error.message ?? payload.message ?? "Request failed.";
-    }
-
     return normalizeUserFacingError(payload).message;
   }
 
@@ -1260,6 +1264,44 @@ const getNestedErrorType = (value: unknown): string | null => {
   return typeof unwrapped.type === "string" ? unwrapped.type : null;
 };
 
+const getNestedErrorStringField = (
+  value: unknown,
+  field: keyof ApiErrorShape
+): string | null => {
+  const unwrapped = unwrapErrorPayload(value);
+
+  if (!isErrorLikeRecord(unwrapped)) {
+    return null;
+  }
+
+  const error = unwrapped.error;
+
+  if (isErrorLikeRecord(error) && typeof error[field] === "string") {
+    return error[field];
+  }
+
+  return typeof unwrapped[field] === "string" ? unwrapped[field] : null;
+};
+
+const getNestedErrorBooleanField = (
+  value: unknown,
+  field: keyof ApiErrorShape
+): boolean | null => {
+  const unwrapped = unwrapErrorPayload(value);
+
+  if (!isErrorLikeRecord(unwrapped)) {
+    return null;
+  }
+
+  const error = unwrapped.error;
+
+  if (isErrorLikeRecord(error) && typeof error[field] === "boolean") {
+    return error[field];
+  }
+
+  return typeof unwrapped[field] === "boolean" ? unwrapped[field] : null;
+};
+
 const normalizeErrorDetails = (value: unknown): unknown => {
   if (value instanceof Error) {
     const record = value as Error & {
@@ -1276,22 +1318,34 @@ const normalizeErrorDetails = (value: unknown): unknown => {
 };
 
 const makeUserFacingError = ({
+  action,
+  code,
   details,
   message,
   persistent = true,
+  reason,
+  retryable = false,
   severity = "error",
   title
 }: {
+  action?: string;
+  code?: string;
   details: unknown;
   message: string;
   persistent?: boolean;
+  reason?: string;
+  retryable?: boolean;
   severity?: ErrorSeverity;
   title: string;
 }): UserFacingError => ({
+  action,
+  code,
   details,
   id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
   message,
   persistent,
+  reason,
+  retryable,
   severity,
   title
 });
@@ -1304,7 +1358,25 @@ const normalizeUserFacingError = (value: unknown): UserFacingError => {
     "Something went wrong.";
   const code = getNestedErrorCode(details);
   const type = getNestedErrorType(details);
+  const title = getNestedErrorStringField(details, "title");
+  const action = getNestedErrorStringField(details, "action");
+  const reason = getNestedErrorStringField(details, "reason");
+  const retryable = getNestedErrorBooleanField(details, "retryable") ?? false;
   const loweredMessage = message.toLowerCase();
+
+  if (title) {
+    return makeUserFacingError({
+      action: action ?? (retryable ? "Retry" : undefined),
+      code: code ?? undefined,
+      details,
+      message,
+      persistent: type !== "validation",
+      reason: reason ?? undefined,
+      retryable,
+      severity: type === "validation" ? "warning" : "error",
+      title
+    });
+  }
 
   if (
     code === "AI_PROVIDER_CAPABILITY_UNSUPPORTED" ||
@@ -1314,6 +1386,8 @@ const normalizeUserFacingError = (value: unknown): UserFacingError => {
       details,
       message: "Web search works only with hosted Gemini. It is hidden in local Ollama mode.",
       persistent: false,
+      reason: "capability_unsupported",
+      retryable: false,
       severity: "warning",
       title: "Web search unavailable"
     });
@@ -1327,6 +1401,9 @@ const normalizeUserFacingError = (value: unknown): UserFacingError => {
     return makeUserFacingError({
       details,
       message: "Open the Ollama app, make sure it is running, then try again.",
+      action: "Start Ollama",
+      reason: "ollama_offline",
+      retryable: true,
       title: "Ollama is not running"
     });
   }
@@ -1339,15 +1416,80 @@ const normalizeUserFacingError = (value: unknown): UserFacingError => {
     return makeUserFacingError({
       details,
       message: "Install the selected Gemma 4 model in Ollama, then try again.",
+      action: "Install model",
+      reason: "ollama_model_missing",
+      retryable: false,
       title: "Gemma 4 model missing"
+    });
+  }
+
+  if (code === "AI_PROVIDER_429" || loweredMessage.includes("quota")) {
+    return makeUserFacingError({
+      action: "Retry",
+      code: code ?? undefined,
+      details,
+      message: "Gemma 4 is temporarily busy. This hosted demo shares API quota, so retry in a moment.",
+      reason: "quota_or_rate_limit",
+      retryable: true,
+      title: "Hosted Gemma 4 quota is full"
+    });
+  }
+
+  if (code === "AI_PROVIDER_503" || loweredMessage.includes("high demand")) {
+    return makeUserFacingError({
+      action: "Retry",
+      code: code ?? undefined,
+      details,
+      message: "Gemma 4 is under high demand. Try again in a few seconds.",
+      reason: "provider_overloaded",
+      retryable: true,
+      title: "Gemma 4 is busy"
+    });
+  }
+
+  if (
+    code === "AI_PROVIDER_404" ||
+    loweredMessage.includes("not found for api version") ||
+    loweredMessage.includes("not supported for generatecontent")
+  ) {
+    return makeUserFacingError({
+      action: "Choose model",
+      code: code ?? undefined,
+      details,
+      message: "That Gemma 4 model is not available from the hosted API. Pick another model and retry.",
+      reason: "model_unavailable",
+      retryable: false,
+      title: "Hosted model unavailable"
+    });
+  }
+
+  if (
+    loweredMessage.includes("thinkingbudget") ||
+    loweredMessage.includes("thinking mode") ||
+    loweredMessage.includes("thinking_config")
+  ) {
+    return makeUserFacingError({
+      action: "Use Fast mode",
+      code: code ?? undefined,
+      details,
+      message: "Thinking mode is not supported for this model/provider combination.",
+      persistent: false,
+      reason: "thinking_unsupported",
+      retryable: false,
+      severity: "warning",
+      title: "Thinking mode unavailable"
     });
   }
 
   if (code === "VALIDATION_ERROR" || type === "validation") {
     return makeUserFacingError({
+      action: action ?? "Review request",
+      code: code ?? undefined,
       details,
       message,
       persistent: false,
+      reason: reason ?? "validation_failed",
+      retryable,
       severity: "warning",
       title: "Request needs a small fix"
     });
@@ -1355,15 +1497,27 @@ const normalizeUserFacingError = (value: unknown): UserFacingError => {
 
   if (type === "provider" || code?.startsWith("AI_PROVIDER_")) {
     return makeUserFacingError({
+      action: retryable ? "Retry" : action ?? undefined,
+      code: code ?? undefined,
       details,
-      message,
+      message: message.includes("{")
+        ? "The model provider could not complete this request."
+        : message,
+      reason: reason ?? "provider_failed",
+      retryable,
       title: "Model provider error"
     });
   }
 
   return makeUserFacingError({
+    action: retryable ? "Retry" : undefined,
+    code: code ?? undefined,
     details,
-    message,
+    message: message.includes("{")
+      ? "Bonsai hit an internal error. Retry once, then inspect the failed run if it repeats."
+      : message,
+    reason: reason ?? "app_error",
+    retryable,
     title: "Something went wrong"
   });
 };
@@ -2540,6 +2694,14 @@ const getMessageFailureText = (message: Message) => {
   ).message;
 };
 
+const getMessageFailureError = (message: Message) => {
+  const resilience = getMessageResilience(message);
+
+  return normalizeUserFacingError(
+    resilience?.error ?? "The assistant response failed."
+  );
+};
+
 const isFailedAssistantMessage = (message: Message) =>
   message.role === "assistant" && message.status === "failed";
 
@@ -3157,11 +3319,13 @@ const BranchDraftModal = ({
 const ErrorToast = ({
   error,
   onClose,
-  onCopyDetails
+  onCopyDetails,
+  onPrimaryAction
 }: {
   error: UserFacingError;
   onClose: () => void;
   onCopyDetails: () => void;
+  onPrimaryAction?: () => void;
 }) => (
   <div
     aria-live="assertive"
@@ -3175,6 +3339,15 @@ const ErrorToast = ({
       <strong>{error.title}</strong>
       <p>{error.message}</p>
       <div className="error-toast__actions">
+        {error.action ? (
+          <button
+            className="error-toast__primary-action"
+            onClick={onPrimaryAction ?? onClose}
+            type="button"
+          >
+            <span>{error.action}</span>
+          </button>
+        ) : null}
         <button onClick={onCopyDetails} type="button">
           <Copy aria-hidden="true" />
           <span>Copy details</span>
@@ -5515,7 +5688,7 @@ export const App = () => {
       }
 
       if (activePathIdRef.current === targetPathId) {
-        setError(message);
+        setError(streamFailure ?? message);
         setStatus(streamFailure ? "Reply failed. Retry is available on the message." : "Message failed.");
       }
     } finally {
@@ -5821,11 +5994,22 @@ export const App = () => {
 
   const handleCopyMessageError = async (message: Message) => {
     const resilience = getMessageResilience(message);
-    const errorText = getMessageFailureText(message);
+    const errorDetails = resilience?.error ?? "The assistant response failed.";
+    const userError = normalizeUserFacingError(errorDetails);
     const runText = resilience?.modelRunId ? `\nRun: ${resilience.modelRunId}` : "";
+    const detailsText = formatErrorDetails(errorDetails);
+    const errorText = [
+      `${userError.title}: ${userError.message}`,
+      runText.trim(),
+      "",
+      "Details:",
+      detailsText
+    ]
+      .filter(Boolean)
+      .join("\n");
 
     try {
-      await writeClipboardText(`${errorText}${runText}`);
+      await writeClipboardText(errorText);
       setStatus("Error details copied.");
     } catch (copyError) {
       const copyMessage =
@@ -7206,6 +7390,9 @@ export const App = () => {
               const isEditingUserMessage = editingMessageId === message.id;
               const isFailedAssistant = isFailedAssistantMessage(message);
               const messageResilience = getMessageResilience(message);
+              const messageFailureError = isFailedAssistant
+                ? getMessageFailureError(message)
+                : null;
               const isStreamingAssistantMessage =
                 message.role === "assistant" && isSending && messageIndex === messages.length - 1;
               const isBranchingEnabledForMessage =
@@ -7241,17 +7428,54 @@ export const App = () => {
                   ) : (
                     <>
                       <div className="assistant-response">
-                        {isFailedAssistant ? (
-                          <div className="message-failure-banner">
-                            <AlertTriangle aria-hidden="true" />
-                            <div>
+                        {messageFailureError ? (
+                          <div className="message-failure-card">
+                            <div className="message-failure-card__icon">
+                              <AlertTriangle aria-hidden="true" />
+                            </div>
+                            <div className="message-failure-card__body">
                               <strong>
                                 {messageResilience?.partial
                                   ? "Response stopped early"
-                                  : "Response failed"}
+                                  : messageFailureError.title}
                               </strong>
-                              <span>{getMessageFailureText(message)}</span>
+                              <p>{messageFailureError.message}</p>
+                              <div className="message-failure-card__actions">
+                                <Button
+                                  className="message-failure-card__button message-failure-card__button--primary"
+                                  disabled={isSending}
+                                  onClick={() => void handleRedoAssistantMessage(message)}
+                                  type="button"
+                                  variant="ghost"
+                                >
+                                  <RefreshCcw aria-hidden="true" />
+                                  <span>{messageFailureError.retryable ? "Retry" : "Redo"}</span>
+                                </Button>
+                                <Button
+                                  className="message-failure-card__button"
+                                  onClick={() => void handleCopyMessageError(message)}
+                                  type="button"
+                                  variant="ghost"
+                                >
+                                  <Copy aria-hidden="true" />
+                                  <span>Copy details</span>
+                                </Button>
+                                <Button
+                                  className="message-failure-card__button"
+                                  onClick={() => handleInspectFailedRun(message)}
+                                  type="button"
+                                  variant="ghost"
+                                >
+                                  <BookOpen aria-hidden="true" />
+                                  <span>Inspect run</span>
+                                </Button>
+                              </div>
                             </div>
+                            {messageFailureError.reason ? (
+                              <span className="message-failure-card__reason">
+                                {messageFailureError.reason.replace(/_/g, " ")}
+                              </span>
+                            ) : null}
                           </div>
                         ) : null}
                         <SmogGradeBadge content={message.contentText} />
@@ -7308,30 +7532,6 @@ export const App = () => {
                         >
                           <RefreshCcw aria-hidden="true" />
                         </Button>
-                        {isFailedAssistant ? (
-                          <>
-                            <Button
-                              aria-label="Copy error"
-                              className="message-action-button"
-                              onClick={() => void handleCopyMessageError(message)}
-                              title="Copy error"
-                              type="button"
-                              variant="ghost"
-                            >
-                              <Copy aria-hidden="true" />
-                            </Button>
-                            <Button
-                              aria-label="Inspect failed run"
-                              className="message-action-button"
-                              onClick={() => handleInspectFailedRun(message)}
-                              title="Inspect failed run"
-                              type="button"
-                              variant="ghost"
-                            >
-                              <BookOpen aria-hidden="true" />
-                            </Button>
-                          </>
-                        ) : null}
                         <Button
                           aria-label="Copy response"
                           className="message-action-button"
@@ -8109,6 +8309,13 @@ export const App = () => {
             error={error}
             onClose={() => setErrorState(null)}
             onCopyDetails={() => void handleCopyErrorDetails()}
+            onPrimaryAction={() => {
+              if (error.action === "Choose model") {
+                setIsLocalModelMenuOpen(true);
+              }
+
+              setErrorState(null);
+            }}
           />
         ) : null}
 

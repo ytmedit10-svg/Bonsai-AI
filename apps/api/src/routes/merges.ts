@@ -3,6 +3,11 @@ import { z } from "zod";
 
 import { ensureRequestUser } from "../services/bootstrap-user-service.js";
 import { MissingAiProviderApiKeyError } from "../services/ai-adapter.js";
+import {
+  buildApiError,
+  buildProviderApiError,
+  getProviderStatusCode
+} from "../services/api-error.js";
 import { getMergeById, requestMerge } from "../services/merge-service.js";
 
 const createMergeSchema = z.object({
@@ -17,50 +22,6 @@ const createMergeSchema = z.object({
 const mergeParamsSchema = z.object({
   mergeId: z.string().uuid()
 });
-
-const getProviderError = (error: unknown) => {
-  if (!error || typeof error !== "object") {
-    return null;
-  }
-
-  const maybeStatus = "status" in error ? error.status : null;
-  const maybeMessage = "message" in error ? error.message : null;
-
-  if (typeof maybeStatus === "number" && typeof maybeMessage === "string") {
-    let message = maybeMessage;
-
-    try {
-      const parsedOuter = JSON.parse(maybeMessage) as {
-        error?: {
-          message?: string;
-        };
-      };
-
-      if (parsedOuter.error?.message) {
-        try {
-          const parsedInner = JSON.parse(parsedOuter.error.message) as {
-            error?: {
-              message?: string;
-            };
-          };
-
-          message = parsedInner.error?.message ?? parsedOuter.error.message;
-        } catch {
-          message = parsedOuter.error.message;
-        }
-      }
-    } catch {
-      message = maybeMessage;
-    }
-
-    return {
-      message,
-      statusCode: maybeStatus
-    };
-  }
-
-  return null;
-};
 
 export const registerMergeRoutes = (server: FastifyInstance) => {
   server.post("/merges", async (request, reply) => {
@@ -97,24 +58,41 @@ export const registerMergeRoutes = (server: FastifyInstance) => {
       return reply.code(201).send(result);
     } catch (error) {
       if (error instanceof MissingAiProviderApiKeyError) {
-        return reply.code(503).send({
-          error: error.message
-        });
+        return reply.code(503).send(
+          buildApiError({
+            action: "Configure key",
+            code: "AI_PROVIDER_MISSING_KEY",
+            message: "Hosted AI is not configured for this deployment.",
+            reason: "provider_missing_key",
+            retryable: false,
+            title: "Hosted AI is not configured",
+            type: "provider"
+          })
+        );
       }
 
-      const providerError = getProviderError(error);
+      const providerError = buildProviderApiError(
+        error,
+        "Failed to create merge."
+      );
 
-      if (providerError) {
-        return reply.code(providerError.statusCode).send({
-          error: providerError.message
-        });
+      if (providerError.error.code !== "AI_PROVIDER_FAILED") {
+        return reply.code(getProviderStatusCode(error) ?? 500).send(providerError);
       }
 
       request.log.error(error);
 
-      return reply.code(500).send({
-        error: "Failed to create merge."
-      });
+      return reply.code(500).send(
+        buildApiError({
+          action: "Retry",
+          code: "MERGE_FAILED",
+          message: "Bonsai could not merge that branch. Retry once, then inspect the failed run if it repeats.",
+          reason: "merge_failed",
+          retryable: true,
+          title: "Merge failed",
+          type: "app"
+        })
+      );
     }
   });
 

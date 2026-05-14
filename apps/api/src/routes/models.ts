@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 
 import { loadEnv } from "../config/env.js";
 import { getActiveInferenceProfile } from "../services/ai-adapter.js";
-import { buildApiError } from "../services/api-error.js";
+import { buildProviderApiError } from "../services/api-error.js";
 import {
   getGeminiThinkingConfigMode,
   supportsGeminiThinking
@@ -120,12 +120,7 @@ export const registerModelRoutes = (server: FastifyInstance) => {
     } catch (error) {
       if (error instanceof OllamaProviderError) {
         return reply.code(error.status).send(
-          buildApiError({
-            code: `OLLAMA_MODELS_${error.status}`,
-            message: error.message,
-            retryable: error.status >= 500,
-            type: "provider"
-          })
+          buildProviderApiError(error, "Could not load local Gemma 4 models.")
         );
       }
 

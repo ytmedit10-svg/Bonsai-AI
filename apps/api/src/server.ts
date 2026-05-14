@@ -38,8 +38,11 @@ export const buildServer = () => {
     if (error instanceof ZodError) {
       void reply.code(400).send(
         buildApiError({
+          action: "Review request",
           code: "VALIDATION_ERROR",
           message: error.issues[0]?.message ?? "The request was invalid.",
+          reason: "validation_failed",
+          title: "Request needs a small fix",
           type: "validation"
         })
       );
@@ -49,9 +52,12 @@ export const buildServer = () => {
     request.log.error(error);
     void reply.code(500).send(
       buildApiError({
+        action: "Retry",
         code: "INTERNAL_ERROR",
-        message: "The app hit an internal error. Try again, then inspect the run if it repeats.",
+        message: "Bonsai hit an internal error. Retry once, then inspect the failed run if it repeats.",
+        reason: "internal_error",
         retryable: true,
+        title: "Bonsai hit an internal error",
         type: "app"
       })
     );
@@ -77,8 +83,11 @@ export const buildServer = () => {
       if (request.method !== "GET") {
         void reply.code(404).send(
           buildApiError({
+            action: "Review route",
             code: "NOT_FOUND",
             message: "Route not found.",
+            reason: "route_not_found",
+            title: "Route not found",
             type: "validation"
           })
         );

@@ -7,6 +7,7 @@ import {
   streamAttachment,
   uploadAttachment
 } from "../services/attachment-service.js";
+import { buildApiError } from "../services/api-error.js";
 
 const attachmentParamsSchema = z.object({
   attachmentId: z.string().uuid()
@@ -42,9 +43,16 @@ export const registerAttachmentRoutes = (server: FastifyInstance) => {
       });
 
       if (!attachment) {
-        return reply.code(404).send({
-          error: "Path not found."
-        });
+        return reply.code(404).send(
+          buildApiError({
+            action: "Refresh",
+            code: "PATH_NOT_FOUND",
+            message: "This chat path could not be found. Refresh and try again.",
+            reason: "path_not_found",
+            title: "Chat path missing",
+            type: "validation"
+          })
+        );
       }
 
       return reply.code(201).send({
@@ -52,14 +60,30 @@ export const registerAttachmentRoutes = (server: FastifyInstance) => {
       });
     } catch (error) {
       if (error instanceof MissingR2ConfigError) {
-        return reply.code(503).send({
-          error: error.message
-        });
+        return reply.code(503).send(
+          buildApiError({
+            action: "Retry",
+            code: "UPLOAD_STORAGE_UNCONFIGURED",
+            message: "Attachment storage is not configured for this deployment.",
+            reason: "upload_storage_unconfigured",
+            retryable: false,
+            title: "Uploads are unavailable",
+            type: "app"
+          })
+        );
       }
 
-      return reply.code(400).send({
-        error: error instanceof Error ? error.message : "Attachment upload failed."
-      });
+      return reply.code(400).send(
+        buildApiError({
+          action: "Retry",
+          code: "ATTACHMENT_UPLOAD_FAILED",
+          message: "This attachment could not be uploaded. Try a smaller file or retry.",
+          reason: "attachment_upload_failed",
+          retryable: true,
+          title: "Attachment upload failed",
+          type: "validation"
+        })
+      );
     }
   });
 
@@ -71,9 +95,16 @@ export const registerAttachmentRoutes = (server: FastifyInstance) => {
       const result = await streamAttachment(params.attachmentId, user.id);
 
       if (!result) {
-        return reply.code(404).send({
-          error: "Attachment not found."
-        });
+        return reply.code(404).send(
+          buildApiError({
+            action: "Refresh",
+            code: "ATTACHMENT_NOT_FOUND",
+            message: "That attachment could not be found. Refresh and try again.",
+            reason: "attachment_not_found",
+            title: "Attachment missing",
+            type: "validation"
+          })
+        );
       }
 
       reply.header("Content-Type", result.attachment.mimeType);
@@ -86,15 +117,31 @@ export const registerAttachmentRoutes = (server: FastifyInstance) => {
       return reply.send(result.body);
     } catch (error) {
       if (error instanceof MissingR2ConfigError) {
-        return reply.code(503).send({
-          error: error.message
-        });
+        return reply.code(503).send(
+          buildApiError({
+            action: "Retry",
+            code: "UPLOAD_STORAGE_UNCONFIGURED",
+            message: "Attachment storage is not configured for this deployment.",
+            reason: "upload_storage_unconfigured",
+            retryable: false,
+            title: "Uploads are unavailable",
+            type: "app"
+          })
+        );
       }
 
       request.log.error(error);
-      return reply.code(502).send({
-        error: "Failed to read attachment."
-      });
+      return reply.code(502).send(
+        buildApiError({
+          action: "Retry",
+          code: "ATTACHMENT_READ_FAILED",
+          message: "Bonsai could not read that attachment. Retry once, then upload it again if it repeats.",
+          reason: "attachment_read_failed",
+          retryable: true,
+          title: "Attachment could not be opened",
+          type: "app"
+        })
+      );
     }
   });
 };
