@@ -23,6 +23,25 @@ The basic workflow is:
 This makes it easier to explore alternatives, compare directions, and preserve
 the reasoning trail behind a decision.
 
+```mermaid
+flowchart LR
+  main["Main chat path"]
+  answer["Assistant answer"]
+  branchA["Branch: practical follow-up"]
+  branchB["Branch: creative angle"]
+  branchC["Branch: critical review"]
+  merge["Merge useful result into main memory"]
+
+  main --> answer
+  answer --> branchA
+  answer --> branchB
+  answer --> branchC
+  branchA --> merge
+  branchB --> merge
+  branchC --> merge
+  merge --> main
+```
+
 ## Core Features
 
 - Branching conversation paths: every branch is a real path with its own
